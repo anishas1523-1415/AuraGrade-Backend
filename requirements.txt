@@ -6,5 +6,7 @@ supabase
 pandas
 openpyxl
 pymupdf
+opencv-python-headless
+numpy
 pinecone
 pydantic
