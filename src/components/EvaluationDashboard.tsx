@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useRef, useState, useCallback } from "react";
+import imageCompression from "browser-image-compression";
 
 /* ------------------------------------------------------------------ */
 /*  Mermaid Renderer (client-side only, React 19 compatible)           */
@@ -205,8 +206,27 @@ export default function EvaluationDashboard() {
     setStreamLog([{ icon: "🚀", text: "Initializing AuraGrade Engine…", phase: "init" }]);
     setCurrentPhase("init");
 
+    // ── Client-side image compression (Network Savior) ──────────
+    // Smartphone cameras produce 5-10 MB photos. Compressing to
+    // ≤500 KB before upload makes it 10x faster on poor Wi-Fi.
+    // Gemini Vision reads handwriting perfectly at this resolution.
+    let uploadFile: File = file;
+    try {
+      const compressed = await imageCompression(file, {
+        maxSizeMB: 0.5,
+        maxWidthOrHeight: 1920,
+        useWebWorker: true,
+      });
+      console.log(
+        `📦 Compressed: ${(file.size / 1024).toFixed(0)}KB → ${(compressed.size / 1024).toFixed(0)}KB`
+      );
+      uploadFile = compressed;
+    } catch (compErr) {
+      console.warn("⚠️ Image compression failed, uploading original:", compErr);
+    }
+
     const formData = new FormData();
-    formData.append("file", file);
+    formData.append("file", uploadFile);
 
     try {
       const response = await fetch("http://127.0.0.1:8000/api/evaluate", {

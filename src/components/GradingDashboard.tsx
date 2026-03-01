@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useRef, useEffect } from "react";
+import imageCompression from "browser-image-compression";
 import { motion, AnimatePresence } from "framer-motion";
 import { Card, CardContent } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -183,8 +184,24 @@ const GradingDashboard = () => {
     setCurrentPass(0);
 
     try {
+      // ── Client-side image compression ──────────────────────────
+      let uploadFile: File = selectedFile;
+      try {
+        const compressed = await imageCompression(selectedFile, {
+          maxSizeMB: 0.5,
+          maxWidthOrHeight: 1920,
+          useWebWorker: true,
+        });
+        console.log(
+          `📦 Compressed: ${(selectedFile.size / 1024).toFixed(0)}KB → ${(compressed.size / 1024).toFixed(0)}KB`
+        );
+        uploadFile = compressed;
+      } catch (compErr) {
+        console.warn("⚠️ Compression failed, uploading original:", compErr);
+      }
+
       const formData = new FormData();
-      formData.append("file", selectedFile);
+      formData.append("file", uploadFile);
 
       let url = `${API_URL}/api/grade/stream`;
       const params = new URLSearchParams();
