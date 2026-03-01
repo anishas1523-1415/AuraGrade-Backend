@@ -61,9 +61,10 @@ app = FastAPI()
 # Enable CORS for your Next.js frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=[os.environ.get("CORS_ORIGIN", "http://localhost:3000")],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 # Initialize Gemini 3 Client
@@ -146,10 +147,14 @@ async def setup_exam(file: UploadFile = File(...)):
         print(f"📥 Received Answer Key PDF: {file.filename}")
 
         # Read the file directly into memory
+        MAX_PDF_SIZE = 10 * 1024 * 1024  # 10 MB
         pdf_bytes = await file.read()
 
         if len(pdf_bytes) == 0:
             raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+        if len(pdf_bytes) > MAX_PDF_SIZE:
+            raise HTTPException(status_code=413, detail=f"PDF exceeds {MAX_PDF_SIZE // (1024*1024)}MB size limit.")
 
         # Use PyMuPDF extraction (fast & accurate)
         extracted_text = extract_text_from_pdf(pdf_bytes)
@@ -181,7 +186,7 @@ async def setup_exam(file: UploadFile = File(...)):
         raise
     except Exception as e:
         print(f"❌ Error processing rubric: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal error while processing the rubric PDF. Please try again.")
 
 
 @app.get("/api/exam-state")
@@ -224,7 +229,12 @@ async def evaluate_script(file: UploadFile = File(...)):
     print(f"📥 Received file: {file.filename} ({file.content_type})")
     print(f"📋 Grading against: {state.exam_name} ({state.char_count} chars)")
 
+    MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10 MB
     image_bytes = await file.read()
+
+    if len(image_bytes) > MAX_IMAGE_SIZE:
+        raise HTTPException(status_code=413, detail=f"Image exceeds {MAX_IMAGE_SIZE // (1024*1024)}MB size limit.")
+
     mime_type = file.content_type or "image/jpeg"
 
     async def event_generator():
@@ -251,7 +261,7 @@ async def evaluate_script(file: UploadFile = File(...)):
                             or final_data.get("reg_no")
                             or "UNKNOWN"
                         ).upper()
-                        db.results_table[reg] = final_data
+                        db.save(reg, final_data)
                         print(f"💾 Saved result for {reg} to MockDatabase")
                     except Exception as parse_err:
                         print(f"⚠️  Could not save result to MockDB: {parse_err}")
@@ -388,8 +398,8 @@ async def grade_paper(
         """
 
         # 4. Call Gemini 3 Flash (High speed, Multimodal)
-        from gemini_retry import call_gemini, parse_response
-        response = call_gemini(
+        from gemini_retry import call_gemini_async, parse_response
+        response = await call_gemini_async(
             client,
             model="gemini-3-flash-preview",
             contents=[
@@ -2226,9 +2236,23 @@ async def preview_institutional_ledger(
 #   POST /api/evaluate  →  grades the paper  →  saves to db
 #   GET  /api/results/AD011  →  returns that grade instantly
 # ---------------------------------------------------------
+from collections import OrderedDict
+
 class MockDatabase:
-    """Simple in-memory results store keyed by registration number."""
-    results_table: dict = {}
+    """Bounded in-memory results store keyed by registration number.
+    Evicts the oldest entry when MAX_ENTRIES is reached to prevent
+    unbounded memory growth during long demo sessions."""
+    MAX_ENTRIES = 500
+
+    def __init__(self):
+        self.results_table: OrderedDict = OrderedDict()
+
+    def save(self, reg_no: str, data: dict):
+        if reg_no in self.results_table:
+            self.results_table.move_to_end(reg_no)
+        self.results_table[reg_no] = data
+        while len(self.results_table) > self.MAX_ENTRIES:
+            self.results_table.popitem(last=False)
 
 db = MockDatabase()
 

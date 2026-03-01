@@ -64,6 +64,14 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
         import fitz  # PyMuPDF
 
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+        if doc.is_encrypted:
+            doc.close()
+            raise RuntimeError(
+                "The uploaded PDF is encrypted/password-protected. "
+                "Please upload an unprotected PDF."
+            )
+
         pages_text = []
 
         for page_num in range(len(doc)):
@@ -242,9 +250,9 @@ async def structure_rubric_from_text(
     if subject_hint:
         prompt += f"\n\n[HINT: This is for the subject: {subject_hint}]"
 
-    from gemini_retry import call_gemini, parse_response
+    from gemini_retry import call_gemini_async, parse_response
 
-    response = call_gemini(
+    response = await call_gemini_async(
         client,
         model="gemini-3-flash-preview",
         contents=[prompt],

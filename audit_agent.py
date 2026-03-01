@@ -240,8 +240,8 @@ As Head of Department, you must:
         })
 
         # Call Gemini — using the most capable available model
-        from gemini_retry import call_gemini, parse_response
-        audit_response = call_gemini(
+        from gemini_retry import call_gemini_async, parse_response
+        audit_response = await call_gemini_async(
             client,
             model="gemini-3-flash-preview",
             contents=[audit_prompt],

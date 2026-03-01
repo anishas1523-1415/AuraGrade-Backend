@@ -108,8 +108,8 @@ async def detect_diagrams(
     """
     client = get_vision_client()
 
-    from gemini_retry import call_gemini, parse_response
-    response = call_gemini(
+    from gemini_retry import call_gemini_async, parse_response
+    response = await call_gemini_async(
         client,
         model="gemini-3-flash-preview",
         contents=[
@@ -239,8 +239,8 @@ async def validate_diagram_logic(
     """
     client = get_vision_client()
 
-    from gemini_retry import call_gemini, parse_response
-    response = call_gemini(
+    from gemini_retry import call_gemini_async, parse_response
+    response = await call_gemini_async(
         client,
         model="gemini-3-flash-preview",
         contents=[

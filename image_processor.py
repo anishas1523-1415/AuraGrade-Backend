@@ -99,3 +99,13 @@ def deskew_and_enhance(image_bytes: bytes) -> bytes:
     except Exception:
         # Never crash the pipeline — return original image untouched
         return image_bytes
+
+
+async def process_image_async(image_bytes: bytes) -> bytes:
+    """Non-blocking wrapper for OpenCV processing.
+
+    Pushes the heavy CPU work (deskew + CLAHE + denoise) to a
+    background thread so FastAPI's event loop stays responsive.
+    """
+    import asyncio
+    return await asyncio.to_thread(deskew_and_enhance, image_bytes)

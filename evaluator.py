@@ -23,8 +23,8 @@ from typing import AsyncGenerator, Optional
 from google import genai
 from google.genai import types
 
-from image_processor import deskew_and_enhance
-from gemini_retry import call_gemini, parse_response
+from image_processor import deskew_and_enhance, process_image_async
+from gemini_retry import call_gemini, call_gemini_async, parse_response
 
 
 # ---------------------------------------------------------------------------
@@ -426,7 +426,7 @@ async def agentic_grade_stream(
         }, indent=2)
 
     # ── Pre-processing: auto-rotate & enhance for better OCR ───
-    processed_bytes = deskew_and_enhance(image_bytes)
+    processed_bytes = await process_image_async(image_bytes)
 
     try:
         # ── Step 0: PASS 0 — Diagram-to-Code Validation ───────────
@@ -587,7 +587,7 @@ Deduct marks for genuine logic flaws identified above.
             diagram_context=diagram_context,
         )
 
-        pass1_response = call_gemini(
+        pass1_response = await call_gemini_async(
             client,
             model="gemini-3-flash-preview",
             contents=[
@@ -818,7 +818,7 @@ Output strictly in JSON:
         # Rate-limit guard: pause before next API call
         await asyncio.sleep(2)
 
-        pass2_response = call_gemini(
+        pass2_response = await call_gemini_async(
             client,
             model="gemini-3-flash-preview",
             contents=[

@@ -133,6 +133,18 @@ def call_gemini(client, *, model: str, contents: list, config) -> Any:
         raise  # Let tenacity handle the retry
 
 
+async def call_gemini_async(client, *, model: str, contents: list, config) -> Any:
+    """Non-blocking wrapper for the synchronous Gemini API call.
+
+    Pushes the network-bound ``call_gemini`` to a background thread
+    so FastAPI's event loop stays responsive during the 3-8 second
+    API round-trip.
+    """
+    return await asyncio.to_thread(
+        call_gemini, client, model=model, contents=contents, config=config,
+    )
+
+
 def parse_response(response) -> dict | None:
     """Safely extract parsed JSON from a Gemini response.
 
