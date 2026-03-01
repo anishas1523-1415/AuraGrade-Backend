@@ -150,6 +150,8 @@ const GradingDashboard = () => {
     const file = e.target.files?.[0];
     if (file) {
       setSelectedFile(file);
+      // Revoke previous blob URL to prevent memory leak
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
       setPreviewUrl(URL.createObjectURL(file));
       setFeedback([]);
       setScore(null);

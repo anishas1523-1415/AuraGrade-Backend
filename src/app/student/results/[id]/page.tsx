@@ -70,9 +70,6 @@ export default function StudentResultPage() {
     return () => mq.removeEventListener("change", handler);
   }, []);
 
-  // On mobile → render the full-screen StudentMobileView
-  if (isMobile) return <StudentMobileView gradeId={gradeId} />;
-
   /* ---------- Fetch grade data ---------- */
   useEffect(() => {
     if (!gradeId) return;
@@ -92,6 +89,9 @@ export default function StudentResultPage() {
     fetchGrade();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gradeId]);
+
+  // On mobile → render the full-screen StudentMobileView (placed after all hooks)
+  if (isMobile) return <StudentMobileView gradeId={gradeId} />;
 
   /* ---------- Appeal handler ---------- */
   const handleAppeal = async () => {

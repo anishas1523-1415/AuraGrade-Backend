@@ -68,10 +68,10 @@ function ResultSkeleton() {
   );
 }
 
-// ⚠️  Replace with your computer's local IPv4 address.
-//     Run `ipconfig` (Windows) or `ifconfig` (Mac/Linux) to find it.
-//     Expo Go on a physical phone CANNOT reach "localhost" — it points to the phone itself.
-const API_BASE = "http://192.168.0.14:8000";
+// Configure your backend URL here.
+// For local dev with Expo Go, use your machine's LAN IP (run `ipconfig` to find it).
+// In production, replace with your deployed backend URL.
+const API_BASE = process.env.EXPO_PUBLIC_API_URL || "http://192.168.0.14:8000";
 
 export default function StudentDashboard() {
   const [regNo, setRegNo] = useState("");

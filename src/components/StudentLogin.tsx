@@ -127,6 +127,9 @@ export const StudentLogin: React.FC<{
   const inputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
+  // Hook must be called at the top level — NOT inside a callback
+  const authFetch = useAuthFetch();
+
   /* Auto-focus on mount */
   useEffect(() => {
     inputRef.current?.focus();
@@ -136,11 +139,11 @@ export const StudentLogin: React.FC<{
   useEffect(() => {
     if (!isSearching) return;
     setScanPhase(0);
-    const intervals: NodeJS.Timeout[] = [];
+    const intervals: number[] = [];
     SCAN_PHASES.forEach((phase, i) => {
-      intervals.push(setTimeout(() => setScanPhase(i), phase.delay));
+      intervals.push(setTimeout(() => setScanPhase(i), phase.delay) as unknown as number);
     });
-    return () => intervals.forEach(clearTimeout);
+    return () => intervals.forEach((id) => clearTimeout(id));
   }, [isSearching]);
 
   /* ---------- Real search ---------- */
@@ -162,8 +165,6 @@ export const StudentLogin: React.FC<{
       abortRef.current?.abort();
       const controller = new AbortController();
       abortRef.current = controller;
-
-      const authFetch = useAuthFetch();
       try {
         const res = await authFetch(
           `${API_URL}/api/students/${encodeURIComponent(cleaned)}/grades`,

@@ -3,6 +3,8 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import imageCompression from "browser-image-compression";
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
 /* ------------------------------------------------------------------ */
 /*  Mermaid Renderer (client-side only, React 19 compatible)           */
 /* ------------------------------------------------------------------ */
@@ -21,7 +23,7 @@ function MermaidChart({ chart }: { chart: string }) {
         mermaid.initialize({
           startOnLoad: false,
           theme: "neutral",
-          securityLevel: "loose",
+          securityLevel: "strict",
           fontFamily: "ui-monospace, monospace",
         });
         const id = `mermaid-${Date.now()}`;
@@ -190,12 +192,14 @@ export default function EvaluationDashboard() {
     if (e.target.files && e.target.files[0]) {
       const selected = e.target.files[0];
       setFile(selected);
+      // Revoke previous blob URL to prevent memory leak
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
       setPreviewUrl(URL.createObjectURL(selected));
       setEvaluationData(null);
       setStreamLog([]);
       setCurrentPhase("");
     }
-  }, []);
+  }, [previewUrl]);
 
   // The core SSE streaming evaluation call
   const startEvaluation = useCallback(async () => {
@@ -231,7 +235,7 @@ export default function EvaluationDashboard() {
     formData.append("file", uploadFile);
 
     try {
-      const response = await fetch("http://127.0.0.1:8000/api/evaluate", {
+      const response = await fetch(`${API_URL}/api/evaluate`, {
         method: "POST",
         body: formData,
       });
