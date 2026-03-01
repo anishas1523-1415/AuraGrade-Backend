@@ -212,17 +212,19 @@ export default function EvaluationDashboard() {
     // Gemini Vision reads handwriting perfectly at this resolution.
     let uploadFile: File = file;
     try {
+      setStreamLog(prev => [...prev, { icon: "📦", text: "Compressing image for fast upload…", phase: "init" }]);
       const compressed = await imageCompression(file, {
         maxSizeMB: 0.5,
         maxWidthOrHeight: 1920,
         useWebWorker: true,
       });
-      console.log(
-        `📦 Compressed: ${(file.size / 1024).toFixed(0)}KB → ${(compressed.size / 1024).toFixed(0)}KB`
-      );
+      const origMB = (file.size / 1024 / 1024).toFixed(2);
+      const compMB = (compressed.size / 1024 / 1024).toFixed(2);
+      setStreamLog(prev => [...prev, { icon: "✅", text: `Compressed from ${origMB}MB to ${compMB}MB`, phase: "init" }]);
       uploadFile = compressed;
     } catch (compErr) {
       console.warn("⚠️ Image compression failed, uploading original:", compErr);
+      setStreamLog(prev => [...prev, { icon: "⚠️", text: "Compression skipped — uploading original", phase: "init" }]);
     }
 
     const formData = new FormData();

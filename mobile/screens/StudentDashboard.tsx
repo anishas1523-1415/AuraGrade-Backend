@@ -143,7 +143,7 @@ export default function StudentDashboard() {
       {loading && !result && <ResultSkeleton />}
 
       {/* ── Results Card ───────────────────────────────────── */}
-      {result && (
+      {result && !loading && (
         <View style={styles.resultCard}>
           {/* Score */}
           <View style={styles.scoreHeader}>
