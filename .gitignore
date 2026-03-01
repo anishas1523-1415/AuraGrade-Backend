@@ -1,0 +1,36 @@
+# Node
+node_modules/
+.next/
+
+# Backend has its OWN repo (AuraGrade-Backend)
+backend/
+
+# Python
+.venv/
+
+# Environment
+.env
+.env.*
+.env.local
+
+# VSCode
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+build/
+dist/
+
+# Logs
+*.log
+
+# Misc
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore secrets
+start-backend.bat
