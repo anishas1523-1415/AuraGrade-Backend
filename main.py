@@ -1,14 +1,16 @@
 import os
 import io
 import json
+import uuid
+import asyncio
 from datetime import datetime, timezone
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Form, Depends
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Form, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from google import genai
 from google.genai import types
 from supabase import create_client, Client
-from typing import Optional
+from typing import Optional, List
 import base64
 
 from auth_guard import require_auth, require_role, optional_auth
@@ -2289,6 +2291,334 @@ async def get_student_results(reg_no: str):
         "message": "Results retrieved successfully.",
         "data": student_data,
     }
+
+
+# ---------------------------------------------------------
+# BATCH PROCESSING ENGINE
+# Enterprise-grade async pipeline for multi-image & PDF grading.
+#
+# Architecture:
+#   POST /api/evaluate-batch  →  accepts List[UploadFile]
+#                              →  returns job_id immediately
+#                              →  processes all pages in background
+#   GET  /api/batch-status/{job_id}  →  polling endpoint for progress
+#
+# PDF Handling:
+#   PyMuPDF renders each page into a 300-DPI image, which is then
+#   fed into the same agentic_grade_stream pipeline as a regular
+#   photo upload. A final aggregation step merges cross-page answers.
+# ---------------------------------------------------------
+
+# In-memory job store (production: use Redis or Supabase)
+_batch_jobs: dict = {}
+
+MAX_BATCH_FILES = 20
+MAX_BATCH_FILE_SIZE = 15 * 1024 * 1024  # 15 MB per file
+
+
+class BatchJob:
+    """Tracks the lifecycle of a batch grading job."""
+    def __init__(self, job_id: str, total_pages: int):
+        self.job_id = job_id
+        self.status = "processing"  # processing | completed | failed
+        self.total_pages = total_pages
+        self.processed_pages = 0
+        self.results: list[dict] = []
+        self.errors: list[str] = []
+        self.created_at = datetime.now(timezone.utc).isoformat()
+        self.completed_at: str | None = None
+        self.aggregated_result: dict | None = None
+
+
+def _pdf_to_images(pdf_bytes: bytes, dpi: int = 300) -> list[tuple[bytes, str]]:
+    """Convert every page of a PDF into high-res JPEG images.
+
+    Returns a list of (image_bytes, mime_type) tuples.
+    Uses PyMuPDF's get_pixmap() at the specified DPI for
+    crystal-clear handwriting recognition.
+    """
+    import fitz
+
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    if doc.is_encrypted:
+        doc.close()
+        raise ValueError("Encrypted PDFs are not supported.")
+
+    images = []
+    zoom = dpi / 72  # fitz default is 72 DPI
+    matrix = fitz.Matrix(zoom, zoom)
+
+    for page_num in range(len(doc)):
+        page = doc.load_page(page_num)
+        pix = page.get_pixmap(matrix=matrix, alpha=False)
+
+        # Convert to JPEG bytes
+        img_bytes = pix.tobytes("jpeg")
+        images.append((img_bytes, "image/jpeg"))
+        print(f"  📄 PDF page {page_num + 1}/{len(doc)} → {len(img_bytes) // 1024}KB image")
+
+    doc.close()
+    return images
+
+
+async def _process_batch_job(job_id: str, pages: list[tuple[bytes, str]], rubric_text: str | None):
+    """Background worker that grades each page through the full pipeline."""
+    job = _batch_jobs.get(job_id)
+    if not job:
+        return
+
+    try:
+        for i, (image_bytes, mime_type) in enumerate(pages):
+            page_label = f"Page {i + 1}/{job.total_pages}"
+            print(f"🔄 [{job_id}] Grading {page_label}...")
+
+            try:
+                # Collect the full SSE stream for this page into a result dict
+                page_result: dict | None = None
+                async for event_str in agentic_grade_stream(
+                    image_bytes,
+                    mime_type=mime_type,
+                    dynamic_rubric_text=rubric_text,
+                ):
+                    # Capture the final result event
+                    if event_str.startswith("event: result"):
+                        try:
+                            data_line = event_str.split("data: ", 1)[1].split("\n")[0]
+                            page_result = json.loads(data_line)
+                        except Exception:
+                            pass
+
+                if page_result:
+                    page_result["_page_number"] = i + 1
+                    job.results.append(page_result)
+                    print(f"✅ [{job_id}] {page_label} graded — score: {page_result.get('score', '?')}")
+                else:
+                    job.errors.append(f"{page_label}: No result returned from grading pipeline")
+
+            except Exception as page_err:
+                job.errors.append(f"{page_label}: {str(page_err)}")
+                print(f"❌ [{job_id}] {page_label} failed: {page_err}")
+
+            job.processed_pages = i + 1
+
+            # Rate-limit between pages to avoid Gemini 429s
+            if i < len(pages) - 1:
+                await asyncio.sleep(2)
+
+        # ── Aggregate results across all pages ─────────────────
+        if job.results:
+            job.aggregated_result = _aggregate_batch_results(job.results)
+
+            # Save aggregated result to MockDatabase
+            reg = (
+                job.aggregated_result.get("registration_number")
+                or job.aggregated_result.get("reg_no")
+                or "UNKNOWN"
+            ).upper()
+            if reg != "UNKNOWN":
+                db.save(reg, job.aggregated_result)
+                print(f"💾 [{job_id}] Aggregated result saved for {reg}")
+
+        job.status = "completed"
+        job.completed_at = datetime.now(timezone.utc).isoformat()
+        print(f"🏁 [{job_id}] Batch job complete — {len(job.results)}/{job.total_pages} pages graded")
+
+    except Exception as e:
+        job.status = "failed"
+        job.errors.append(f"Fatal error: {str(e)}")
+        job.completed_at = datetime.now(timezone.utc).isoformat()
+        print(f"💥 [{job_id}] Batch job failed: {e}")
+
+
+def _aggregate_batch_results(results: list[dict]) -> dict:
+    """Merge per-page grading results into a single consolidated result.
+
+    - Combines questions from all pages (handles answers split across pages)
+    - Sums total score
+    - Averages confidence
+    - Merges feedback lists
+    """
+    all_questions = []
+    all_feedback = []
+    total_score = 0.0
+    total_max = 0.0
+    confidence_sum = 0.0
+    reg_no = "UNKNOWN"
+    is_flagged = False
+
+    for r in results:
+        # Collect registration number from first page that has it
+        if reg_no == "UNKNOWN":
+            reg_no = (
+                r.get("registration_number")
+                or r.get("reg_no")
+                or "UNKNOWN"
+            ).upper()
+
+        # Collect questions
+        questions = r.get("questions", [])
+        if questions:
+            all_questions.extend(questions)
+
+        # Sum scores
+        score = r.get("score", 0)
+        if isinstance(score, (int, float)):
+            total_score += score
+
+        max_marks = r.get("max_marks", r.get("total_marks", 0))
+        if isinstance(max_marks, (int, float)):
+            total_max += max_marks
+
+        # Average confidence
+        conf = r.get("confidence", 0)
+        if isinstance(conf, (int, float)):
+            confidence_sum += conf
+
+        # Merge feedback
+        fb = r.get("feedback", [])
+        if isinstance(fb, list):
+            all_feedback.extend(fb)
+
+        # Any page flagged → whole submission flagged
+        if r.get("is_flagged"):
+            is_flagged = True
+
+    return {
+        "registration_number": reg_no,
+        "score": round(total_score, 2),
+        "max_marks": round(total_max, 2),
+        "confidence": round(confidence_sum / max(len(results), 1), 3),
+        "is_flagged": is_flagged,
+        "questions": all_questions,
+        "feedback": all_feedback,
+        "pages_graded": len(results),
+        "batch_mode": True,
+    }
+
+
+# ─── Batch Evaluate Endpoint ─────────────────────────────────
+
+@app.post("/api/evaluate-batch")
+async def evaluate_batch(
+    files: List[UploadFile] = File(...),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+):
+    """
+    Enterprise batch grading endpoint.
+
+    Accepts multiple images and/or PDFs. Each PDF is split into
+    per-page images at 300 DPI. All pages are graded asynchronously
+    in the background. Returns a job_id for polling progress.
+
+    Supported formats: JPEG, PNG, WEBP, PDF
+    Max files: 20 | Max size per file: 15 MB
+    """
+    if not state.active_rubric_text:
+        raise HTTPException(
+            status_code=400,
+            detail="No active rubric. Upload an Answer Key PDF via /api/setup-exam first.",
+        )
+
+    if len(files) > MAX_BATCH_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many files. Maximum is {MAX_BATCH_FILES} per batch.",
+        )
+
+    # ── Collect all pages (images + PDF→image conversions) ────
+    pages: list[tuple[bytes, str]] = []
+    filenames: list[str] = []
+
+    for f in files:
+        content_type = f.content_type or ""
+        raw_bytes = await f.read()
+
+        if len(raw_bytes) > MAX_BATCH_FILE_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File '{f.filename}' exceeds {MAX_BATCH_FILE_SIZE // (1024*1024)}MB limit.",
+            )
+
+        if content_type == "application/pdf" or (f.filename and f.filename.lower().endswith(".pdf")):
+            # Convert PDF pages to images
+            try:
+                pdf_images = _pdf_to_images(raw_bytes)
+                pages.extend(pdf_images)
+                filenames.append(f"{f.filename} ({len(pdf_images)} pages)")
+                print(f"📄 PDF '{f.filename}' → {len(pdf_images)} page images")
+            except ValueError as ve:
+                raise HTTPException(status_code=400, detail=str(ve))
+            except Exception as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Failed to process PDF '{f.filename}': {str(e)}",
+                )
+
+        elif content_type.startswith("image/"):
+            pages.append((raw_bytes, content_type))
+            filenames.append(f.filename or "image")
+
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported file type '{content_type}' for '{f.filename}'. Use images or PDFs.",
+            )
+
+    if not pages:
+        raise HTTPException(status_code=400, detail="No valid pages found in uploaded files.")
+
+    # ── Create job & launch background processing ─────────────
+    job_id = str(uuid.uuid4())[:12]
+    job = BatchJob(job_id=job_id, total_pages=len(pages))
+    _batch_jobs[job_id] = job
+
+    # Clean up old jobs (keep last 50)
+    if len(_batch_jobs) > 50:
+        oldest_keys = list(_batch_jobs.keys())[:-50]
+        for k in oldest_keys:
+            del _batch_jobs[k]
+
+    background_tasks.add_task(_process_batch_job, job_id, pages, state.active_rubric_text)
+
+    print(f"🚀 Batch job {job_id} started — {len(pages)} pages from {len(files)} files")
+
+    return {
+        "status": "processing",
+        "job_id": job_id,
+        "total_pages": len(pages),
+        "files": filenames,
+        "message": f"Batch grading started for {len(pages)} pages. Poll /api/batch-status/{job_id} for progress.",
+    }
+
+
+@app.get("/api/batch-status/{job_id}")
+async def get_batch_status(job_id: str):
+    """
+    Polling endpoint for batch job progress.
+
+    Returns current status, pages processed, and results when complete.
+    The frontend polls this every 3-5 seconds until status is 'completed'.
+    """
+    job = _batch_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Batch job '{job_id}' not found.")
+
+    response = {
+        "job_id": job.job_id,
+        "status": job.status,
+        "total_pages": job.total_pages,
+        "processed_pages": job.processed_pages,
+        "progress_percent": round((job.processed_pages / max(job.total_pages, 1)) * 100, 1),
+        "created_at": job.created_at,
+        "completed_at": job.completed_at,
+        "errors": job.errors,
+    }
+
+    if job.status == "completed" and job.aggregated_result:
+        response["result"] = job.aggregated_result
+        response["per_page_results"] = job.results
+
+    return response
 
 
 if __name__ == "__main__":
