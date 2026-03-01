@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+google-genai
+python-multipart
+supabase
+pandas
+openpyxl
+pymupdf
+pinecone
+pydantic
