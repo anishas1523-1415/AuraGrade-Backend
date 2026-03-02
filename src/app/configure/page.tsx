@@ -418,6 +418,7 @@ export default function RubricUploadPage() {
         ref={fileInputRef}
         type="file"
         accept="image/*,.txt,.md,.pdf"
+        multiple
         className="hidden"
         onChange={handleFileSelect}
       />
@@ -425,6 +426,7 @@ export default function RubricUploadPage() {
         ref={pdfInputRef}
         type="file"
         accept=".pdf,application/pdf,image/*"
+        multiple
         className="hidden"
         onChange={handlePdfUpload}
       />

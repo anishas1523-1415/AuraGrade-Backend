@@ -610,7 +610,8 @@ const GradingDashboard = () => {
       <input
         ref={fileInputRef}
         type="file"
-        accept="image/*"
+        accept="image/*,.pdf"
+        multiple
         className="hidden"
         onChange={handleFileSelect}
       />

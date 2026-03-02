@@ -219,7 +219,8 @@ export const MobileScanner: React.FC = () => {
       <input
         ref={fileInputRef}
         type="file"
-        accept="image/*"
+        accept="image/*,.pdf"
+        multiple
         capture="environment"
         className="hidden"
         onChange={handleFileSelect}

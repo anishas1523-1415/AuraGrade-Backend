@@ -528,7 +528,7 @@ export default function EvaluationDashboard() {
             <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
               <input
                 type="file"
-                accept="image/*"
+                accept="image/*,.pdf"
                 className="hidden"
                 ref={fileInputRef}
                 onChange={handleFileChange}
