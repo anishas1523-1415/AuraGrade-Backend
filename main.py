@@ -2318,7 +2318,7 @@ MAX_BATCH_FILE_SIZE = 15 * 1024 * 1024  # 15 MB per file
 
 class BatchJob:
     """Tracks the lifecycle of a batch grading job."""
-    def __init__(self, job_id: str, total_pages: int):
+    def __init__(self, job_id: str, total_pages: int, detected_student: dict | None = None):
         self.job_id = job_id
         self.status = "processing"  # processing | completed | failed
         self.total_pages = total_pages
@@ -2328,6 +2328,7 @@ class BatchJob:
         self.created_at = datetime.now(timezone.utc).isoformat()
         self.completed_at: str | None = None
         self.aggregated_result: dict | None = None
+        self.detected_student = detected_student  # Auto-ID from header parser
 
 
 def _pdf_to_images(pdf_bytes: bytes, dpi: int = 300) -> list[tuple[bytes, str]]:
@@ -2361,7 +2362,7 @@ def _pdf_to_images(pdf_bytes: bytes, dpi: int = 300) -> list[tuple[bytes, str]]:
     return images
 
 
-async def _process_batch_job(job_id: str, pages: list[tuple[bytes, str]], rubric_text: str | None):
+async def _process_batch_job(job_id: str, pages: list[tuple[bytes, str]], rubric_text: str | None, detected_reg_no: str | None = None, detected_assessment_id: str | None = None):
     """Background worker that grades each page through the full pipeline."""
     job = _batch_jobs.get(job_id)
     if not job:
@@ -2409,6 +2410,10 @@ async def _process_batch_job(job_id: str, pages: list[tuple[bytes, str]], rubric
         if job.results:
             job.aggregated_result = _aggregate_batch_results(job.results)
 
+            # Override reg_no with header-parser auto-detection if available
+            if detected_reg_no and detected_reg_no != "FLAG_FOR_MANUAL":
+                job.aggregated_result["registration_number"] = detected_reg_no.upper()
+
             # Save aggregated result to MockDatabase
             reg = (
                 job.aggregated_result.get("registration_number")
@@ -2418,6 +2423,27 @@ async def _process_batch_job(job_id: str, pages: list[tuple[bytes, str]], rubric
             if reg != "UNKNOWN":
                 db.save(reg, job.aggregated_result)
                 print(f"💾 [{job_id}] Aggregated result saved for {reg}")
+
+            # ── Sync to Supabase grades table ────────────────
+            if reg != "UNKNOWN" and detected_assessment_id and supabase:
+                try:
+                    db_record = save_grade_to_db(
+                        student_reg_no=reg,
+                        assessment_id=detected_assessment_id,
+                        ai_results=job.aggregated_result,
+                    )
+                    if db_record:
+                        job.aggregated_result["synced_to_supabase"] = True
+                        job.aggregated_result["student_name"] = (
+                            (job.detected_student or {}).get("student", {}) or {}
+                        ).get("name", reg)
+                        print(f"🗄️ [{job_id}] Grade synced to Supabase for {reg}")
+                    else:
+                        job.aggregated_result["synced_to_supabase"] = False
+                        print(f"⚠️ [{job_id}] Supabase sync skipped (student not in roster?)")
+                except Exception as sync_err:
+                    job.aggregated_result["synced_to_supabase"] = False
+                    print(f"⚠️ [{job_id}] Supabase sync failed: {sync_err}")
 
         job.status = "completed"
         job.completed_at = datetime.now(timezone.utc).isoformat()
@@ -2567,9 +2593,37 @@ async def evaluate_batch(
     if not pages:
         raise HTTPException(status_code=400, detail="No valid pages found in uploaded files.")
 
+    # ── Auto-detect student from first page header ────────────
+    detected_student: dict | None = None
+    detected_reg_no: str | None = None
+    try:
+        first_img, first_mime = pages[0]
+        if supabase:
+            detected_student = await identify_and_match_student(
+                image_bytes=first_img,
+                mime_type=first_mime,
+                supabase_client=supabase,
+            )
+            detected_reg_no = (
+                (detected_student.get("student") or {}).get("reg_no")
+                or (detected_student.get("header") or {}).get("reg_no")
+            )
+        else:
+            header = await identify_student_from_header(first_img, first_mime)
+            detected_student = {"header": header, "student": None, "assessment": None, "matched": False}
+            detected_reg_no = header.get("reg_no")
+        print(f"🔍 Auto-detected student: {detected_reg_no or 'UNKNOWN'}")
+    except Exception as hdr_err:
+        print(f"⚠️ Header auto-detect failed (non-blocking): {hdr_err}")
+
+    # Extract assessment ID from auto-detection (if matched)
+    detected_assessment_id: str | None = None
+    if detected_student:
+        detected_assessment_id = (detected_student.get("assessment") or {}).get("id")
+
     # ── Create job & launch background processing ─────────────
     job_id = str(uuid.uuid4())[:12]
-    job = BatchJob(job_id=job_id, total_pages=len(pages))
+    job = BatchJob(job_id=job_id, total_pages=len(pages), detected_student=detected_student)
     _batch_jobs[job_id] = job
 
     # Clean up old jobs (keep last 50)
@@ -2578,7 +2632,7 @@ async def evaluate_batch(
         for k in oldest_keys:
             del _batch_jobs[k]
 
-    background_tasks.add_task(_process_batch_job, job_id, pages, state.active_rubric_text)
+    background_tasks.add_task(_process_batch_job, job_id, pages, state.active_rubric_text, detected_reg_no, detected_assessment_id)
 
     print(f"🚀 Batch job {job_id} started — {len(pages)} pages from {len(files)} files")
 
@@ -2587,6 +2641,7 @@ async def evaluate_batch(
         "job_id": job_id,
         "total_pages": len(pages),
         "files": filenames,
+        "detected_student": detected_student,
         "message": f"Batch grading started for {len(pages)} pages. Poll /api/batch-status/{job_id} for progress.",
     }
 
@@ -2612,6 +2667,7 @@ async def get_batch_status(job_id: str):
         "created_at": job.created_at,
         "completed_at": job.completed_at,
         "errors": job.errors,
+        "detected_student": job.detected_student,
     }
 
     if job.status == "completed" and job.aggregated_result:
