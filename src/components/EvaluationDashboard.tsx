@@ -4,6 +4,7 @@ import React, { useEffect, useRef, useState, useCallback } from "react";
 import imageCompression from "browser-image-compression";
 import { useDropzone } from "react-dropzone";
 import { downloadCSV, downloadPDF, type ReportRow } from "@/lib/report-export";
+import toast from "react-hot-toast";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -392,9 +393,23 @@ export default function EvaluationDashboard() {
       const jobId = data.job_id;
       setBatchJobId(jobId);
       setBatchTotal(data.total_pages);
+
+      // Show auto-detected student if header parser found one
+      const detectedReg =
+        data.detected_student?.student?.reg_no ??
+        data.detected_student?.header?.reg_no;
+      const detectedName = data.detected_student?.student?.name;
+
       setStreamLog((prev) => [
         ...prev,
         { icon: "📋", text: `Job ${jobId} created — ${data.total_pages} pages queued`, phase: "batch" },
+        ...(detectedReg && detectedReg !== "FLAG_FOR_MANUAL"
+          ? [{
+              icon: "🔍",
+              text: `Auto-detected student: ${detectedReg}${detectedName ? ` — ${detectedName}` : ""}`,
+              phase: "batch" as const,
+            }]
+          : []),
       ]);
 
       // ── Poll for progress ────────────────────────────────
@@ -428,11 +443,22 @@ export default function EvaluationDashboard() {
                 ...prev.filter((s) => s.phase !== "progress"),
                 { icon: "✅", text: `Batch complete — ${status.result.pages_graded} pages graded`, phase: "done" },
               ]);
+              // Success toast
+              const syncedName =
+                status.result.student_name ||
+                status.result.registration_number ||
+                "Student";
+              if (status.result.synced_to_supabase) {
+                toast.success(`Grade for ${syncedName} synced to Supabase!`);
+              } else {
+                toast.success(`Batch grading complete — ${status.result.pages_graded} pages graded`);
+              }
             } else {
               setStreamLog((prev) => [
                 ...prev,
                 { icon: "❌", text: `Batch failed: ${status.errors?.join(", ") || "Unknown error"}`, phase: "error" },
               ]);
+              toast.error("Batch grading failed. Check logs for details.");
             }
 
             setIsEvaluating(false);

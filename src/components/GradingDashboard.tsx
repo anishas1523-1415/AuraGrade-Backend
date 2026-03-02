@@ -36,6 +36,7 @@ import {
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import toast from "react-hot-toast";
 import { UserBadge } from "@/components/UserBadge";
 import { useAuth } from "@/lib/auth-context";
 import { useAuthFetch } from "@/lib/use-auth-fetch";
@@ -147,24 +148,51 @@ const GradingDashboard = () => {
   /*  Handlers                                                         */
   /* ---------------------------------------------------------------- */
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      setSelectedFile(file);
-      // Revoke previous blob URL to prevent memory leak
-      if (previewUrl) URL.revokeObjectURL(previewUrl);
-      setPreviewUrl(URL.createObjectURL(file));
-      setFeedback([]);
-      setScore(null);
-      setConfidence(null);
-      setIsFlagged(false);
-      setError(null);
-      setIsGrading(false);
-      setGradeId(null);
-      setSavedToDb(false);
-      setProfStatus("Pending");
-      setShowAppealInput(false);
-      setAnnotations([]);
+    if (!file) return;
+
+    setSelectedFile(file);
+    // Revoke previous blob URL to prevent memory leak
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setPreviewUrl(URL.createObjectURL(file));
+    setFeedback([]);
+    setScore(null);
+    setConfidence(null);
+    setIsFlagged(false);
+    setError(null);
+    setIsGrading(false);
+    setGradeId(null);
+    setSavedToDb(false);
+    setProfStatus("Pending");
+    setShowAppealInput(false);
+    setAnnotations([]);
+
+    // ── Auto-detect student from answer-sheet header ──────────
+    try {
+      const headerForm = new FormData();
+      headerForm.append("file", file);
+      const detection = await fetch(`${API_URL}/api/parse-header`, {
+        method: "POST",
+        body: headerForm,
+      });
+      if (detection.ok) {
+        const data = await detection.json();
+        // Auto-fill student dropdown
+        const regNo =
+          data.student?.reg_no ?? data.header?.reg_no;
+        if (regNo && regNo !== "FLAG_FOR_MANUAL") {
+          setStudentRegNo(regNo);
+        }
+        // Auto-fill assessment dropdown
+        const assessmentId = data.assessment?.id;
+        if (assessmentId) {
+          setSelectedAssessment(assessmentId);
+        }
+      }
+    } catch {
+      // Header detection is best-effort; failure is non-blocking
+      console.warn("⚠️ Auto-detect header failed — manual selection required");
     }
   };
 
@@ -365,6 +393,13 @@ const GradingDashboard = () => {
           setSavedToDb(true);
           setGradeId((payload.grade_id as string) ?? null);
           setFeedback((prev) => [...prev, "💾 Grade saved to Supabase."]);
+          // Success toast — "Grade for [Student] synced to Supabase"
+          const studentLabel = studentRegNo
+            ? students.find((s) => s.reg_no === studentRegNo)?.name
+              ? `${studentRegNo} — ${students.find((s) => s.reg_no === studentRegNo)!.name}`
+              : studentRegNo
+            : "Student";
+          toast.success(`Grade for ${studentLabel} synced to Supabase!`);
         }
         break;
 
