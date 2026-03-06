@@ -24,7 +24,7 @@ from google import genai
 from google.genai import types
 
 from image_processor import deskew_and_enhance, process_image_async
-from gemini_retry import call_gemini, call_gemini_async, parse_response
+from gemini_retry import call_gemini, call_gemini_async, parse_response, QuotaExhaustedError, get_quota_wait_seconds, _rotate_client
 
 
 # ---------------------------------------------------------------------------
@@ -438,7 +438,7 @@ async def agentic_grade_stream(
             "text": "Pass 0 — Diagram Detection Agent scanning for visual structures…",
             "phase": "diagram_detect",
         })
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.05)
 
         diagram_result = None
         diagram_context = ""  # injected into grader prompt
@@ -460,7 +460,7 @@ async def agentic_grade_stream(
                     "has_diagram": True,
                     "diagrams": diagrams,
                 })
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.05)
 
                 yield _sse_event("step", {
                     "icon": "💻",
@@ -531,16 +531,13 @@ Deduct marks for genuine logic flaws identified above.
                 "phase": "diagram_error",
             })
 
-        # Rate-limit guard: pause before next API call
-        await asyncio.sleep(2)
-
         # ── Step 1: Extracting handwriting ────────────────────────
         yield _sse_event("step", {
             "icon": "🔍",
             "text": "Extracting handwriting using Document AI…",
             "phase": "extract",
         })
-        await asyncio.sleep(0.3)  # let the UI render
+        await asyncio.sleep(0.1)  # let the UI render
 
         # ── Step 2: RAG — retrieve model-answer context ───────────
         yield _sse_event("step", {
@@ -565,7 +562,7 @@ Deduct marks for genuine logic flaws identified above.
                 "reason": "Pinecone not configured or no model answers indexed",
             })
 
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.05)
 
         # ── Step 3: PASS 1 — Grader Agent ─────────────────────────
         yield _sse_event("step", {
@@ -587,18 +584,43 @@ Deduct marks for genuine logic flaws identified above.
             diagram_context=diagram_context,
         )
 
-        pass1_response = await call_gemini_async(
-            client,
-            model="gemini-3-flash-preview",
-            contents=[
-                types.Part.from_bytes(data=processed_bytes, mime_type="image/jpeg"),
-                grader_prompt,
-            ],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
-            ),
-        )
+        pass1_response = None
+        for _attempt in range(4):
+            try:
+                pass1_response = await call_gemini_async(
+                    client,
+                    model="gemini-3-flash-preview",
+                    contents=[
+                        types.Part.from_bytes(data=processed_bytes, mime_type="image/jpeg"),
+                        grader_prompt,
+                    ],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
+                    ),
+                )
+                break  # success
+            except QuotaExhaustedError as qe:
+                if _attempt >= 3:
+                    raise
+                wait_secs = max(qe.wait_seconds, 15)
+                remaining = wait_secs
+                while remaining > 0:
+                    yield _sse_event("step", {
+                        "icon": "⏳",
+                        "text": f"API quota reached — waiting {int(remaining)}s for reset… (retry {_attempt + 2}/4)",
+                        "phase": "quota_wait",
+                    })
+                    await asyncio.sleep(min(5, remaining))
+                    remaining -= 5
+                refreshed = _rotate_client()
+                if refreshed:
+                    client = refreshed
+                yield _sse_event("step", {
+                    "icon": "🔄",
+                    "text": "Retrying Grader Agent…",
+                    "phase": "quota_retry",
+                })
 
         # ── SAFETY NET: handle None / exception / malformed ───────
         pass1_result = parse_response(pass1_response)
@@ -685,7 +707,7 @@ Deduct marks for genuine logic flaws identified above.
                     yield _sse_event("pass1_partial", {
                         "new_annotations": [annotation_obj],
                     })
-                    await asyncio.sleep(0.15)  # stagger for visual effect
+                    await asyncio.sleep(0.05)  # stagger for visual effect
             # Also emit the full batch for backward compatibility
             if indexed_annotations:
                 yield _sse_event("annotations", {"annotations": indexed_annotations})
@@ -705,7 +727,7 @@ Deduct marks for genuine logic flaws identified above.
             "phase": "pass1_done",
         })
 
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.1)
 
         # ── Step 4: PASS 2 — Professor Audit Agent ────────────────
         yield _sse_event("step", {
@@ -815,21 +837,46 @@ Output strictly in JSON:
                 "auditing_ids": reviewing_ids,
             })
 
-        # Rate-limit guard: pause before next API call
-        await asyncio.sleep(2)
+        # Brief pause before next API call
+        await asyncio.sleep(0.5)
 
-        pass2_response = await call_gemini_async(
-            client,
-            model="gemini-3-flash-preview",
-            contents=[
-                types.Part.from_bytes(data=processed_bytes, mime_type="image/jpeg"),
-                audit_prompt,
-            ],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
-            ),
-        )
+        pass2_response = None
+        for _attempt in range(4):
+            try:
+                pass2_response = await call_gemini_async(
+                    client,
+                    model="gemini-3-flash-preview",
+                    contents=[
+                        types.Part.from_bytes(data=processed_bytes, mime_type="image/jpeg"),
+                        audit_prompt,
+                    ],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
+                    ),
+                )
+                break  # success
+            except QuotaExhaustedError as qe:
+                if _attempt >= 3:
+                    raise
+                wait_secs = max(qe.wait_seconds, 15)
+                remaining = wait_secs
+                while remaining > 0:
+                    yield _sse_event("step", {
+                        "icon": "⏳",
+                        "text": f"API quota reached — waiting {int(remaining)}s for reset… (retry {_attempt + 2}/4)",
+                        "phase": "quota_wait",
+                    })
+                    await asyncio.sleep(min(5, remaining))
+                    remaining -= 5
+                refreshed = _rotate_client()
+                if refreshed:
+                    client = refreshed
+                yield _sse_event("step", {
+                    "icon": "🔄",
+                    "text": "Retrying Audit Agent…",
+                    "phase": "quota_retry",
+                })
 
         # ── SAFETY NET: handle None / exception / malformed ───────
         pass2_result = parse_response(pass2_response)
@@ -894,14 +941,14 @@ Output strictly in JSON:
                 "phase": "pass2_confirmed",
             })
 
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.05)
 
         yield _sse_event("step", {
             "icon": "🛡️",
             "text": "Checking for plagiarism patterns and anomalies…",
             "phase": "anomaly_check",
         })
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.05)
 
         # ── Step 5: Finalise ──────────────────────────────────────
         # ── DETERMINISTIC MATH: Recalculate final score from per-question
@@ -981,6 +1028,13 @@ Output strictly in JSON:
                 })
 
         yield _sse_event("done", {"status": "complete"})
+
+    except QuotaExhaustedError as qe:
+        yield _sse_event("error", {
+            "message": f"⚠️ API quota exhausted after retries. Please wait {int(qe.wait_seconds)}s and try again.",
+            "status": "QUOTA_EXHAUSTED",
+        })
+        yield _sse_event("done", {"status": "error"})
 
     except Exception as exc:
         err_msg = str(exc)

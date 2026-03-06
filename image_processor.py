@@ -101,11 +101,56 @@ def deskew_and_enhance(image_bytes: bytes) -> bytes:
         return image_bytes
 
 
+def resize_for_api(image_bytes: bytes, max_bytes: int = 4 * 1024 * 1024) -> bytes:
+    """Resize / re-compress an image so it fits within `max_bytes`.
+
+    Gemini's inline image limit is ~20MB but large images cause
+    400 INVALID_ARGUMENT errors. This function progressively reduces
+    quality and resolution until the image is small enough.
+    """
+    if len(image_bytes) <= max_bytes:
+        return image_bytes
+
+    try:
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            return image_bytes
+
+        # Step 1: Try just lowering JPEG quality
+        for quality in [85, 70, 55, 40]:
+            ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, quality])
+            if ok and len(buf.tobytes()) <= max_bytes:
+                return buf.tobytes()
+
+        # Step 2: Resize progressively (50% each round) + compress
+        for scale in [0.75, 0.5, 0.35, 0.25]:
+            h, w = img.shape[:2]
+            new_w, new_h = int(w * scale), int(h * scale)
+            resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            ok, buf = cv2.imencode(".jpg", resized, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            if ok and len(buf.tobytes()) <= max_bytes:
+                return buf.tobytes()
+
+        # Last resort: smallest size with low quality
+        h, w = img.shape[:2]
+        resized = cv2.resize(img, (w // 4, h // 4), interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode(".jpg", resized, [cv2.IMWRITE_JPEG_QUALITY, 50])
+        if ok:
+            return buf.tobytes()
+        return image_bytes
+    except Exception:
+        return image_bytes
+
+
 async def process_image_async(image_bytes: bytes) -> bytes:
     """Non-blocking wrapper for OpenCV processing.
 
     Pushes the heavy CPU work (deskew + CLAHE + denoise) to a
     background thread so FastAPI's event loop stays responsive.
+    Also ensures the output is within the Gemini API size limit.
     """
     import asyncio
-    return await asyncio.to_thread(deskew_and_enhance, image_bytes)
+    processed = await asyncio.to_thread(deskew_and_enhance, image_bytes)
+    # Ensure the image is small enough for the Gemini API
+    return await asyncio.to_thread(resize_for_api, processed)
