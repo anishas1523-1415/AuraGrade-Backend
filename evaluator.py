@@ -97,7 +97,34 @@ def get_evaluator_supabase():
 
 
 # ---------------------------------------------------------------------------
-#  RAG: retrieve model-answer context from Pinecone (integrated embedding)
+#  BM25 encoder (lazy — only initialised when pinecone-text is installed)
+# ---------------------------------------------------------------------------
+
+_bm25_encoder = None
+
+
+def _get_bm25_encoder():
+    """Lazily initialise and return the BM25 encoder for sparse vectors."""
+    global _bm25_encoder
+    if _bm25_encoder is not None:
+        return _bm25_encoder
+
+    try:
+        from pinecone_text.sparse import BM25Encoder
+
+        _bm25_encoder = BM25Encoder().default()
+        print("✅ BM25 encoder initialised — hybrid search enabled")
+        return _bm25_encoder
+    except ImportError:
+        print("⚠️  pinecone-text not installed — falling back to dense-only search")
+        return None
+    except Exception as exc:
+        print(f"⚠️  BM25 init failed: {exc}")
+        return None
+
+
+# ---------------------------------------------------------------------------
+#  RAG: retrieve model-answer context from Pinecone (hybrid search)
 # ---------------------------------------------------------------------------
 
 
@@ -108,8 +135,12 @@ async def retrieve_model_answer_context(
 ) -> str:
     """
     Query Pinecone for the most relevant model-answer chunks.
-    Uses Pinecone's integrated embedding (llama-text-embed-v2) so we
-    pass text directly — no manual vector computation needed.
+
+    Uses an alpha-blended hybrid search strategy:
+    - Dense vector (semantic): understands meaning / concepts
+    - Sparse vector (BM25): enforces exact keyword & syntax matching
+
+    Falls back to Pinecone's integrated embedding if BM25 is unavailable.
     Returns a merged string of matching passages, or "" if Pinecone is off.
     """
     index = _get_pinecone_index()
@@ -117,7 +148,44 @@ async def retrieve_model_answer_context(
         return ""
 
     try:
-        # Pinecone integrated-embedding search: pass text, get results
+        bm25 = _get_bm25_encoder()
+
+        if bm25 is not None:
+            # ── Hybrid Search: Dense + Sparse (BM25) ──────────────
+            # Generate sparse vector for exact keyword matching
+            sparse_vector = bm25.encode_queries(query_text)
+
+            # Use Pinecone's integrated embedding for dense + BM25 sparse
+            # The index.search() API handles dense automatically; we add sparse.
+            # Fall back to query() if the index supports explicit vectors.
+            try:
+                results = index.search(
+                    namespace="__default__",
+                    query={
+                        "top_k": top_k,
+                        "inputs": {"text": query_text},
+                        "sparse_vector": sparse_vector,
+                    },
+                    fields=["text", "assessment_id", "chunk_index"],
+                )
+
+                passages = []
+                for hit in results.get("result", {}).get("hits", []):
+                    fields = hit.get("fields", {})
+                    if assessment_id and fields.get("assessment_id") != assessment_id:
+                        continue
+                    text_val = fields.get("text", "")
+                    if text_val:
+                        passages.append(text_val)
+
+                if passages:
+                    return "\n---\n".join(passages)
+            except Exception:
+                # If hybrid search param isn't supported by this index,
+                # fall through to the standard path below
+                pass
+
+        # ── Fallback: Dense-only integrated embedding search ──────
         results = index.search(
             namespace="__default__",
             query={"top_k": top_k, "inputs": {"text": query_text}},
@@ -127,7 +195,6 @@ async def retrieve_model_answer_context(
         passages = []
         for hit in results.get("result", {}).get("hits", []):
             fields = hit.get("fields", {})
-            # Optionally filter by assessment_id client-side
             if assessment_id and fields.get("assessment_id") != assessment_id:
                 continue
             text_val = fields.get("text", "")
@@ -297,6 +364,8 @@ Output your response strictly in the following JSON format:
     }}}},
     "score": <float — total of all per-question scores>,
     "confidence": <float 0-1>,
+    "confidence_score": <integer 0-100 — percentage reflecting how confident you are in this evaluation based on handwriting clarity and answer ambiguity>,
+    "human_review_required": <boolean — set to true if confidence_score is below 80>,
     "detected_key_terms": ["term1", "term2"],
     "penalties_applied": [
         "<description of any critical penalty applied>"
@@ -644,6 +713,8 @@ Deduct marks for genuine logic flaws identified above.
 
         pass1_result.setdefault("score", 0.0)
         pass1_result.setdefault("confidence", 0.0)
+        pass1_result.setdefault("confidence_score", round(pass1_result.get("confidence", 0.0) * 100))
+        pass1_result.setdefault("human_review_required", pass1_result.get("confidence_score", 0) < 80)
         pass1_result.setdefault("feedback", [])
         pass1_result.setdefault("is_flagged", False)
         pass1_result.setdefault("detected_key_terms", [])
@@ -948,6 +1019,58 @@ Output strictly in JSON:
             "text": "Checking for plagiarism patterns and anomalies…",
             "phase": "anomaly_check",
         })
+
+        # ── Similarity Sentinel: inline plagiarism check ──────────
+        sentinel_report = {"sentinel_triggered": False, "max_similarity_score": 0.0}
+        try:
+            from similarity_sentinel import check_collusion_risk
+
+            if assessment_id and student_reg_no:
+                student_id = student_reg_no  # Use reg_no as identifier
+                # Extract text from pass1 for comparison
+                answer_text = pass1_result.get("justification_note", "") or ""
+                # Also use detected key terms as signal
+                key_terms_str = ", ".join(pass1_result.get("detected_key_terms", []))
+                sentinel_query = f"{answer_text} {key_terms_str}".strip()
+
+                if sentinel_query:
+                    collusion = await check_collusion_risk(
+                        current_student_id=student_id,
+                        answer_text=sentinel_query,
+                        assessment_id=assessment_id,
+                        threshold=0.92,
+                    )
+
+                    if collusion.get("is_flagged"):
+                        matches = collusion.get("potential_collusion_with", [])
+                        top_match = matches[0] if matches else {}
+                        max_score = top_match.get("similarity_score", 0.0)
+                        sentinel_report = {
+                            "sentinel_triggered": True,
+                            "max_similarity_score": max_score,
+                            "matches": len(matches),
+                            "top_peer": top_match.get("peer_reg_no", "unknown"),
+                        }
+                        yield _sse_event("step", {
+                            "icon": "🚨",
+                            "text": f"SENTINEL TRIGGERED: {max_score}% match with {top_match.get('peer_reg_no', 'peer')} — plagiarism risk detected!",
+                            "phase": "sentinel_alert",
+                        })
+                    else:
+                        yield _sse_event("step", {
+                            "icon": "✅",
+                            "text": "Sentinel clear — no plagiarism patterns detected.",
+                            "phase": "sentinel_clear",
+                        })
+
+                    yield _sse_event("sentinel", sentinel_report)
+        except Exception as sent_exc:
+            yield _sse_event("step", {
+                "icon": "⚠️",
+                "text": f"Sentinel check skipped: {str(sent_exc)[:60]}",
+                "phase": "sentinel_skip",
+            })
+
         await asyncio.sleep(0.05)
 
         # ── Step 5: Finalise ──────────────────────────────────────
@@ -962,9 +1085,17 @@ Output strictly in JSON:
             # Fallback: use audit score if no per-question breakdown
             deterministic_score = pass2_result["score"]
 
+        # Derive confidence_score from pass2 confidence if not already set
+        confidence_score = pass1_result.get("confidence_score", round(pass2_result["confidence"] * 100))
+        human_review_required = pass1_result.get("human_review_required", confidence_score < 80)
+
         final_result = {
             "score": deterministic_score,
             "confidence": pass2_result["confidence"],
+            "confidence_score": confidence_score,
+            "human_review_required": human_review_required,
+            "sentinel_triggered": sentinel_report.get("sentinel_triggered", False),
+            "max_similarity_score": sentinel_report.get("max_similarity_score", 0.0),
             "feedback": pass2_result["feedback"],
             "is_flagged": pass2_result["is_flagged"],
             "audit_notes": audit_notes,

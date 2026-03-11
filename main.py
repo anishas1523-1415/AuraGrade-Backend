@@ -832,6 +832,80 @@ async def upload_rubric_pdf(
     }
 
 
+# ─── Voice-to-Rubric: Gemini converts teacher's dictation to structured rubric ─
+
+@app.post("/api/voice-to-rubric")
+async def voice_to_rubric(transcript: str = Form(...)):
+    """
+    Convert a teacher's spoken description into structured rubric JSON.
+
+    The teacher speaks naturally (e.g., "Question 1 is worth 2 marks,
+    give 1 mark for the definition and 1 for the example") and Gemini
+    structures it into the rubric format used by AuraGrade.
+    """
+    if not transcript or not transcript.strip():
+        raise HTTPException(status_code=400, detail="Transcript is empty")
+
+    prompt = f"""You are a Rubric Structuring Agent for an academic grading system.
+
+A teacher has dictated the following rubric criteria using their voice.
+Convert this natural language into a structured JSON rubric.
+
+Teacher's dictation:
+\"{transcript}\"
+
+Output ONLY valid JSON in this exact format — no markdown, no extra text:
+{{
+  "criteria": [
+    {{
+      "criteria": "<short label for the marking criterion>",
+      "max_marks": <integer>,
+      "description": "<grading guideline based on what the teacher said>"
+    }}
+  ]
+}}
+
+Rules:
+- Extract every distinct question or marking criterion mentioned.
+- If the teacher says "Question 1 is worth 5 marks", create an entry with max_marks: 5.
+- Combine related sub-points under one criterion when logical.
+- Use clear, concise labels (e.g. "Q1: Neural Network Definition").
+- If the teacher mentions partial credit rules, include them in the description.
+"""
+
+    try:
+        from gemini_retry import call_gemini_async, parse_response
+        response = await call_gemini_async(
+            client,
+            model="gemini-2.0-flash",
+            contents=[prompt],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.1,
+            ),
+        )
+
+        result = parse_response(response)
+
+        if not result or not isinstance(result, dict):
+            raise HTTPException(status_code=422, detail="AI could not structure the dictation")
+
+        criteria = result.get("criteria", [])
+        return {
+            "status": "success",
+            "criteria": criteria,
+            "questions_detected": len(criteria),
+            "total_marks": sum(c.get("max_marks", 0) for c in criteria),
+            "transcript": transcript,
+        }
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Voice-to-rubric conversion failed: {str(exc)[:200]}",
+        )
+
+
 # ─── Create Assessment ───────────────────────────────────────
 
 @app.post("/api/assessments")
