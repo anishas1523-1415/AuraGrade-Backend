@@ -27,6 +27,7 @@ import {
   ArrowUpRight,
   ArrowDownRight,
   Minus,
+  Bell,
 } from "lucide-react";
 
 import type { AuditNotes, AuditStep, GradeData } from "@/types/grading";
@@ -61,6 +62,16 @@ export default function StudentResultPage() {
   const [auditRunning, setAuditRunning] = useState(false);
   const [auditSteps, setAuditSteps] = useState<AuditStep[]>([]);
   const [auditComplete, setAuditComplete] = useState(false);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [notifications, setNotifications] = useState<Array<{
+    id: string;
+    title: string;
+    message: string;
+    teacher_note: string;
+    reviewed_at: string;
+    is_unread: boolean;
+  }>>([]);
+  const [unreadCount, setUnreadCount] = useState(0);
 
   useEffect(() => {
     const mq = window.matchMedia("(max-width: 1023px)");
@@ -89,6 +100,28 @@ export default function StudentResultPage() {
     fetchGrade();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gradeId]);
+
+  useEffect(() => {
+    if (!grade?.students?.reg_no) return;
+    const regNo = grade.students.reg_no;
+    const key = `auragrade_notifications_last_seen_${regNo}`;
+    const since = localStorage.getItem(key);
+
+    const fetchNotifications = async () => {
+      try {
+        const qs = since ? `?since=${encodeURIComponent(since)}` : "";
+        const res = await authFetch(`${API_URL}/api/students/${encodeURIComponent(regNo)}/notifications${qs}`);
+        if (!res.ok) return;
+        const payload = await res.json();
+        setNotifications(payload.notifications || []);
+        setUnreadCount(payload.unread_count || 0);
+      } catch {
+        // ignore notification fetch errors
+      }
+    };
+
+    fetchNotifications();
+  }, [grade?.students?.reg_no]);
 
   // On mobile → render the full-screen StudentMobileView (placed after all hooks)
   if (isMobile) return <StudentMobileView gradeId={gradeId} />;
@@ -178,11 +211,17 @@ export default function StudentResultPage() {
   };
 
   /* ---------- Derived ---------- */
+  const rubric = grade?.assessments?.rubric_json;
+  const rubricMaxMarks = rubric
+    ? Object.values(rubric).reduce((sum, c) => sum + c.max_marks, 0)
+    : 15;
   const confidencePct = grade ? Math.round(grade.confidence * 100) : 0;
+  const highCutoff = rubricMaxMarks * 0.7;
+  const mediumCutoff = rubricMaxMarks * 0.4;
   const scoreColor =
-    grade && grade.ai_score >= 7
+    grade && grade.ai_score >= highCutoff
       ? "text-emerald-400"
-      : grade && grade.ai_score >= 4
+      : grade && grade.ai_score >= mediumCutoff
         ? "text-amber-400"
         : "text-red-400";
   const statusBadge: Record<string, { color: string; label: string }> = {
@@ -192,6 +231,19 @@ export default function StudentResultPage() {
     Overridden: { color: "border-purple-500/30 bg-purple-500/10 text-purple-400", label: "Overridden" },
     Audited: { color: "border-teal-500/30 bg-teal-500/10 text-teal-400", label: "Audited" },
   };
+
+  const markLossPoints = (grade?.feedback || []).filter((point) => {
+    const text = point.toLowerCase();
+    return (
+      text.includes("missing") ||
+      text.includes("incorrect") ||
+      text.includes("deduct") ||
+      text.includes("penalty") ||
+      text.includes("flaw") ||
+      text.includes("error") ||
+      point.includes("⚠")
+    );
+  });
 
   /* ---------- Loading / Error ---------- */
   if (loading) {
@@ -219,7 +271,6 @@ export default function StudentResultPage() {
   }
 
   const badge = statusBadge[grade.prof_status] || statusBadge.Pending;
-  const rubric = grade.assessments.rubric_json;
 
   return (
     <div className="min-h-screen bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-900 via-[#0b1120] to-black text-white font-sans">
@@ -238,6 +289,59 @@ export default function StudentResultPage() {
           <span className="text-xs text-white/30">
             {grade.students.reg_no} · {grade.assessments.subject}
           </span>
+          <div className="ml-auto relative">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                const next = !notificationsOpen;
+                setNotificationsOpen(next);
+                if (next && grade.students.reg_no) {
+                  const key = `auragrade_notifications_last_seen_${grade.students.reg_no}`;
+                  localStorage.setItem(key, new Date().toISOString());
+                  setUnreadCount(0);
+                }
+              }}
+              className="border-white/10 bg-white/5 text-white/60 hover:bg-white/10 backdrop-blur-md"
+            >
+              <Bell className="h-4 w-4" />
+              {unreadCount > 0 && (
+                <span className="ml-2 inline-flex items-center justify-center min-w-5 h-5 px-1 rounded-full bg-red-500/90 text-white text-[10px] font-bold">
+                  {unreadCount}
+                </span>
+              )}
+            </Button>
+
+            <AnimatePresence>
+              {notificationsOpen && (
+                <motion.div
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 8 }}
+                  className="absolute right-0 mt-2 w-[380px] max-w-[90vw] rounded-xl border border-white/10 bg-slate-950/95 backdrop-blur-xl shadow-2xl z-50"
+                >
+                  <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between">
+                    <p className="text-xs uppercase tracking-wider text-white/40">Notification Center</p>
+                    <span className="text-[10px] text-white/30">{notifications.length} total</span>
+                  </div>
+                  <div className="max-h-[320px] overflow-auto p-3 space-y-2">
+                    {notifications.length === 0 ? (
+                      <p className="text-xs text-white/30 py-4 text-center">No appeal updates yet.</p>
+                    ) : (
+                      notifications.map((n) => (
+                        <div key={n.id} className={`rounded-lg border px-3 py-2 ${n.is_unread ? "border-red-500/20 bg-red-500/5" : "border-white/10 bg-white/[0.03]"}`}>
+                          <p className="text-xs text-white/80 font-medium">{n.title}</p>
+                          <p className="text-[11px] text-white/50 mt-1">{n.message}</p>
+                          <p className="text-[11px] text-cyan-300/80 mt-1">Teacher note: {n.teacher_note}</p>
+                          <p className="text-[10px] text-white/30 mt-1">{new Date(n.reviewed_at).toLocaleString("en-IN")}</p>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
         </div>
 
         {/* ========== HEADER ========== */}
@@ -290,7 +394,7 @@ export default function StudentResultPage() {
             </p>
             <p className={`text-6xl font-black ${scoreColor}`}>
               {grade.ai_score}
-              <span className="text-xl text-white/20 font-normal"> / 10</span>
+              <span className="text-xl text-white/20 font-normal"> / {rubricMaxMarks}</span>
             </p>
             <p className="text-xs text-white/30 mt-1">
               Confidence: <span className={scoreColor}>{confidencePct}%</span>
@@ -444,6 +548,26 @@ export default function StudentResultPage() {
               </ScrollArea>
             </Card>
 
+            <Card className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur-2xl overflow-hidden">
+              <div className="border-b border-white/10 px-5 py-4">
+                <h3 className="text-sm font-semibold text-white/80 flex items-center gap-2">
+                  <AlertTriangle className="h-4 w-4 text-amber-400" />
+                  Where You Lost Marks
+                </h3>
+              </div>
+              <div className="p-5 space-y-2">
+                {markLossPoints.length === 0 ? (
+                  <p className="text-sm text-emerald-300/80">No explicit mark deductions were detected in the AI trace.</p>
+                ) : (
+                  markLossPoints.map((point, idx) => (
+                    <div key={idx} className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
+                      {point}
+                    </div>
+                  ))
+                )}
+              </div>
+            </Card>
+
             {/* ─── Confidence Meter ─── */}
             <Card className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur-2xl p-5">
               <div className="flex items-center justify-between mb-3">
@@ -483,7 +607,7 @@ export default function StudentResultPage() {
                     onClick={() => setShowAppeal(true)}
                   >
                     <RotateCcw className="mr-2 h-4 w-4" />
-                    Request Manual Review
+                    Appeal for Transparency
                   </Button>
                 ) : (
                   <motion.div
@@ -494,7 +618,7 @@ export default function StudentResultPage() {
                     <textarea
                       value={appealReason}
                       onChange={(e) => setAppealReason(e.target.value)}
-                      placeholder="Describe why you believe this grade needs review…"
+                      placeholder="Explain where the rubric was satisfied and why marks should be reconsidered…"
                       rows={3}
                       className="w-full rounded-xl border border-red-500/20 bg-white/5 px-4 py-3 text-sm text-white/80 placeholder:text-white/20 focus:outline-none focus:ring-1 focus:ring-red-500/40 resize-none"
                     />

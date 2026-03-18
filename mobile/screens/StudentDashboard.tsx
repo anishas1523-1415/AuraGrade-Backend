@@ -4,6 +4,7 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
+  Pressable,
   StyleSheet,
   ScrollView,
   ActivityIndicator,
@@ -73,10 +74,21 @@ function ResultSkeleton() {
 // In production, replace with your deployed backend URL.
 const API_BASE = process.env.EXPO_PUBLIC_API_URL || "http://192.168.0.14:8000";
 
-export default function StudentDashboard() {
-  const [regNo, setRegNo] = useState("");
+interface StudentDashboardProps {
+  initialRegNo?: string;
+  onLogout?: () => void;
+}
+
+export default function StudentDashboard({ initialRegNo = "", onLogout }: StudentDashboardProps) {
+  const [regNo, setRegNo] = useState(initialRegNo);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<any>(null);
+
+  useEffect(() => {
+    if (initialRegNo) {
+      setRegNo(initialRegNo);
+    }
+  }, [initialRegNo]);
 
   const fetchResults = async () => {
     if (!regNo.trim()) {
@@ -111,6 +123,11 @@ export default function StudentDashboard() {
       <View style={styles.header}>
         <Text style={styles.title}>AuraGrade Student</Text>
         <Text style={styles.subtitle}>Instant Result Portal</Text>
+        {onLogout && (
+          <Pressable onPress={onLogout} style={styles.logoutBtn}>
+            <Text style={styles.logoutText}>Switch Role</Text>
+          </Pressable>
+        )}
       </View>
 
       {/* ── Search Card ────────────────────────────────────── */}
@@ -228,6 +245,22 @@ const styles = StyleSheet.create({
     color: "#94A3B8",
     fontSize: 14,
     marginTop: 5,
+  },
+  logoutBtn: {
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: "#334155",
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    backgroundColor: "#1E293B",
+  },
+  logoutText: {
+    color: "#CBD5E1",
+    fontSize: 11,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.6,
   },
 
   // Search

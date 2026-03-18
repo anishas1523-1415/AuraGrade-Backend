@@ -284,8 +284,15 @@ export default function EvaluationDashboard() {
     const formData = new FormData();
     formData.append("file", uploadFile);
 
+    const idempotencyKey = [
+      file.name,
+      String(file.size),
+      String(file.lastModified),
+      "quick-evaluate",
+    ].join("|");
+
     try {
-      const response = await fetch(`${API_URL}/api/evaluate`, {
+      const response = await fetch(`${API_URL}/api/evaluate?idempotency_key=${encodeURIComponent(idempotencyKey)}`, {
         method: "POST",
         body: formData,
       });

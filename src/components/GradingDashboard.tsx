@@ -284,6 +284,14 @@ const GradingDashboard = () => {
       const params = new URLSearchParams();
       if (studentRegNo) params.set("student_reg_no", studentRegNo);
       if (selectedAssessment) params.set("assessment_id", selectedAssessment);
+      const idempotencyKey = [
+        selectedFile.name,
+        String(selectedFile.size),
+        String(selectedFile.lastModified),
+        studentRegNo || "NO_STUDENT",
+        selectedAssessment || "NO_ASSESSMENT",
+      ].join("|");
+      params.set("idempotency_key", idempotencyKey);
       if (params.toString()) url += `?${params.toString()}`;
 
       // POST with fetch, then read the response body as an SSE stream
@@ -421,7 +429,7 @@ const GradingDashboard = () => {
         setIsFlagged(flagged);
         setFeedback((prev) => [
           ...prev,
-          `💯 Final Score: ${s}/10`,
+          `💯 Final Score: ${s}/15`,
         ]);
         if (hrr) {
           setFeedback((prev) => [
@@ -670,7 +678,7 @@ const GradingDashboard = () => {
       "⚠️ Formula derivation missing 'dt' term in step 3.",
       "📊 Diagram analysis: Flowchart logic matches Model Answer.",
       "✨ Assigning partial marks for clear conceptual understanding.",
-      "💯 Final Score Calculated: 8.5/10",
+      "💯 Final Score Calculated: 12.5/15",
     ];
     setIsGrading(true);
     setFeedback([]);
@@ -1059,7 +1067,7 @@ const GradingDashboard = () => {
                       AI Marks
                     </p>
                     <p className="text-base font-bold text-blue-400">
-                      {score !== null ? `${score} / 10` : "-- / 10"}
+                      {score !== null ? `${score} / 15` : "-- / 15"}
                     </p>
                   </div>
 

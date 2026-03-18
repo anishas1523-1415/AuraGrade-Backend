@@ -81,16 +81,20 @@ interface AuditLog {
   created_at: string;
 }
 
-interface RecentGrade {
-  id: string;
-  ai_score: number;
+interface AuditRecord {
+  grade_id: string;
+  student_id: string;
+  student_name: string;
+  status: string;
+  score: number;
   confidence: number;
-  prof_status: string;
-  is_flagged: boolean;
+  feedback_trace: unknown[];
+  subject: string;
+  title: string;
   graded_at: string;
-  reviewed_at: string | null;
-  students: { reg_no: string; name: string };
-  assessments: { subject: string; title: string };
+  scan_image_url: string | null;
+  hash_verify: "VERIFIED" | "PENDING";
+  transaction_hash: string;
 }
 
 interface Assessment {
@@ -173,7 +177,8 @@ export default function AdminDashboard() {
 
   const [stats, setStats] = useState<AdminStats | null>(null);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
-  const [recentGrades, setRecentGrades] = useState<RecentGrade[]>([]);
+  const [auditRecords, setAuditRecords] = useState<AuditRecord[]>([]);
+  const [selectedAuditRecord, setSelectedAuditRecord] = useState<AuditRecord | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<"overview" | "logs" | "activity" | "finalize" | "intelligence" | "diagram" | "seal" | "sentinel" | "ledger">("overview");
 
@@ -203,14 +208,14 @@ export default function AdminDashboard() {
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
-      const [statsRes, activityRes, assessmentsRes] = await Promise.all([
+      const [statsRes, auditRes, assessmentsRes] = await Promise.all([
         authFetch(`${API_URL}/api/admin/stats`),
-        authFetch(`${API_URL}/api/admin/recent-activity?limit=30`),
+        authFetch(`${API_URL}/api/admin/audit-records?limit=50`),
         authFetch(`${API_URL}/api/assessments`),
       ]);
 
       if (statsRes.ok) setStats(await statsRes.json());
-      if (activityRes.ok) setRecentGrades(await activityRes.json());
+      if (auditRes.ok) setAuditRecords(await auditRes.json());
       if (assessmentsRes.ok) setAssessments(await assessmentsRes.json());
     } catch (err) {
       console.error("Failed to fetch admin data:", err);
@@ -447,7 +452,7 @@ export default function AdminDashboard() {
             },
             {
               label: "Avg Score",
-              value: `${s.avg_score}/10`,
+              value: `${s.avg_score}/15`,
               icon: <TrendingUp className="h-4 w-4 text-emerald-400" />,
               color: "border-emerald-500/20",
             },
@@ -582,83 +587,69 @@ export default function AdminDashboard() {
                 <div className="border-b border-white/10 px-6 py-4 flex items-center justify-between">
                   <h3 className="text-sm font-semibold text-white/80 flex items-center gap-2">
                     <ScanLine className="h-4 w-4 text-blue-400" />
-                    Recent Grading Activity
+                    Enterprise Audit View
                   </h3>
-                  <span className="text-[10px] text-white/20">{recentGrades.length} records</span>
+                  <span className="text-[10px] text-white/20">{auditRecords.length} records</span>
                 </div>
                 <ScrollArea className="max-h-[600px]">
                   <Table>
                     <TableHeader>
                       <TableRow className="border-white/5 hover:bg-transparent">
-                        <TableHead className="text-white/30">Student</TableHead>
-                        <TableHead className="text-white/30">Subject</TableHead>
+                        <TableHead className="text-white/30">Student ID</TableHead>
                         <TableHead className="text-white/30">Score</TableHead>
-                        <TableHead className="text-white/30">Confidence</TableHead>
                         <TableHead className="text-white/30">Status</TableHead>
+                        <TableHead className="text-white/30">Hash Verify</TableHead>
                         <TableHead className="text-white/30">Date</TableHead>
-                        <TableHead className="text-white/30 text-right">Action</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {recentGrades.length === 0 ? (
+                      {auditRecords.length === 0 ? (
                         <TableRow className="border-white/5">
-                          <TableCell colSpan={7} className="text-center text-white/20 py-12">
-                            No grading activity yet
+                          <TableCell colSpan={5} className="text-center text-white/20 py-12">
+                            No enterprise audit records yet
                           </TableCell>
                         </TableRow>
                       ) : (
-                        recentGrades.map((g, i) => (
+                        auditRecords.map((record, i) => (
                           <motion.tr
-                            key={g.id}
+                            key={record.grade_id}
                             initial={{ opacity: 0 }}
                             animate={{ opacity: 1 }}
                             transition={{ delay: 0.02 * i }}
-                            className="border-white/5 hover:bg-white/[0.02] transition-colors"
+                            className="border-white/5 hover:bg-white/[0.02] transition-colors cursor-pointer"
+                            onClick={() => setSelectedAuditRecord(record)}
                           >
                             <TableCell>
                               <div>
-                                <p className="text-sm text-white/70 font-medium">{g.students?.name || "—"}</p>
-                                <p className="text-[10px] text-white/30">{g.students?.reg_no}</p>
+                                <p className="text-sm text-white/70 font-medium">{record.student_id || "—"}</p>
+                                <p className="text-[10px] text-white/30">{record.student_name || "—"}</p>
                               </div>
                             </TableCell>
                             <TableCell>
-                              <p className="text-xs text-white/50">{g.assessments?.subject || "—"}</p>
-                              <p className="text-[10px] text-white/20">{g.assessments?.title}</p>
-                            </TableCell>
-                            <TableCell>
                               <span className={`text-sm font-bold ${
-                                g.ai_score >= 7 ? "text-emerald-400" : g.ai_score >= 4 ? "text-amber-400" : "text-red-400"
+                                record.score >= 10 ? "text-emerald-400" : record.score >= 6 ? "text-amber-400" : "text-red-400"
                               }`}>
-                                {g.ai_score}<span className="text-white/20 font-normal">/10</span>
+                                {record.score}<span className="text-white/20 font-normal">/15</span>
                               </span>
                             </TableCell>
                             <TableCell>
-                              <span className="text-xs text-white/40">{Math.round(g.confidence * 100)}%</span>
+                              <Badge className={`text-[10px] ${statusColors[record.status] || statusColors.Pending}`}>
+                                {record.status}
+                              </Badge>
                             </TableCell>
                             <TableCell>
-                              <Badge className={`text-[10px] ${statusColors[g.prof_status] || statusColors.Pending}`}>
-                                {g.prof_status}
+                              <Badge className={`text-[10px] ${record.hash_verify === "VERIFIED" ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400" : "border-amber-500/30 bg-amber-500/10 text-amber-400"}`}>
+                                {record.hash_verify}
                               </Badge>
                             </TableCell>
                             <TableCell>
                               <span className="text-[10px] text-white/30 flex items-center gap-1">
                                 <Clock className="h-3 w-3" />
-                                {new Date(g.graded_at).toLocaleDateString("en-IN", {
+                                {new Date(record.graded_at).toLocaleDateString("en-IN", {
                                   day: "numeric",
                                   month: "short",
                                 })}
                               </span>
-                            </TableCell>
-                            <TableCell className="text-right">
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => router.push(`/student/results/${g.id}`)}
-                                className="h-7 text-[10px] border-white/10 text-white/40 hover:bg-white/5"
-                              >
-                                <Eye className="h-3 w-3 mr-1" />
-                                View
-                              </Button>
                             </TableCell>
                           </motion.tr>
                         ))
@@ -667,6 +658,77 @@ export default function AdminDashboard() {
                   </Table>
                 </ScrollArea>
               </Card>
+
+              <AnimatePresence>
+                {selectedAuditRecord && (
+                  <motion.div
+                    initial={{ x: 420, opacity: 0 }}
+                    animate={{ x: 0, opacity: 1 }}
+                    exit={{ x: 420, opacity: 0 }}
+                    transition={{ type: "spring", stiffness: 250, damping: 28 }}
+                    className="fixed top-0 right-0 h-full w-full max-w-[420px] z-50 border-l border-white/10 bg-slate-950/95 backdrop-blur-xl shadow-2xl"
+                  >
+                    <div className="h-full flex flex-col">
+                      <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between">
+                        <div>
+                          <p className="text-xs text-white/30">Audit Record</p>
+                          <p className="text-sm text-white/80 font-semibold">{selectedAuditRecord.student_id}</p>
+                        </div>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setSelectedAuditRecord(null)}
+                          className="border-white/10 bg-white/5 text-white/60 hover:bg-white/10"
+                        >
+                          Close
+                        </Button>
+                      </div>
+
+                      <ScrollArea className="flex-1">
+                        <div className="p-5 space-y-4">
+                          <Card className="rounded-xl border border-white/10 bg-white/5 overflow-hidden">
+                            <CardContent className="p-4">
+                              <p className="text-[10px] uppercase tracking-wider text-white/30 mb-2">Scanned Script</p>
+                              {selectedAuditRecord.scan_image_url ? (
+                                <img
+                                  src={selectedAuditRecord.scan_image_url}
+                                  alt="Scanned answer script"
+                                  className="w-full h-44 object-cover rounded-lg border border-white/10"
+                                />
+                              ) : (
+                                <div className="w-full h-44 rounded-lg border border-dashed border-white/10 flex items-center justify-center text-white/30 text-xs">
+                                  Scan preview unavailable for this record
+                                </div>
+                              )}
+                            </CardContent>
+                          </Card>
+
+                          <Card className="rounded-xl border border-white/10 bg-white/5">
+                            <CardContent className="p-4">
+                              <p className="text-[10px] uppercase tracking-wider text-white/30 mb-2">AI JSON Feedback Trace</p>
+                              <pre className="text-[11px] text-white/70 whitespace-pre-wrap break-words font-mono max-h-64 overflow-auto">
+                                {JSON.stringify(selectedAuditRecord.feedback_trace || [], null, 2)}
+                              </pre>
+                            </CardContent>
+                          </Card>
+
+                          <Card className="rounded-xl border border-white/10 bg-white/5">
+                            <CardContent className="p-4">
+                              <p className="text-[10px] uppercase tracking-wider text-white/30 mb-2">Cryptographic Hash</p>
+                              <p className="text-xs text-cyan-300 break-all font-mono">{selectedAuditRecord.transaction_hash}</p>
+                              <div className="mt-3">
+                                <Badge className={`text-[10px] ${selectedAuditRecord.hash_verify === "VERIFIED" ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400" : "border-amber-500/30 bg-amber-500/10 text-amber-400"}`}>
+                                  {selectedAuditRecord.hash_verify}
+                                </Badge>
+                              </div>
+                            </CardContent>
+                          </Card>
+                        </div>
+                      </ScrollArea>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </motion.div>
           )}
 

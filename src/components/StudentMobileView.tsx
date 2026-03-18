@@ -23,6 +23,7 @@ import {
   Send,
   Sparkles,
   Eye,
+  Bell,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 
@@ -227,6 +228,16 @@ export const StudentMobileView: React.FC<{ gradeId: string }> = ({
 
   // Feedback expand
   const [expandFeedback, setExpandFeedback] = useState(false);
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [notifications, setNotifications] = useState<Array<{
+    id: string;
+    title: string;
+    message: string;
+    teacher_note: string;
+    reviewed_at: string;
+    is_unread: boolean;
+  }>>([]);
+  const [unreadCount, setUnreadCount] = useState(0);
 
   const authFetch = useAuthFetch();
   /* ---------- Fetch ---------- */
@@ -244,6 +255,26 @@ export const StudentMobileView: React.FC<{ gradeId: string }> = ({
       }
     })();
   }, [gradeId, authFetch]);
+
+  useEffect(() => {
+    if (!grade?.students?.reg_no) return;
+    const regNo = grade.students.reg_no;
+    const key = `auragrade_notifications_last_seen_${regNo}`;
+    const since = localStorage.getItem(key);
+
+    (async () => {
+      try {
+        const qs = since ? `?since=${encodeURIComponent(since)}` : "";
+        const res = await authFetch(`${API_URL}/api/students/${encodeURIComponent(regNo)}/notifications${qs}`);
+        if (!res.ok) return;
+        const payload = await res.json();
+        setNotifications(payload.notifications || []);
+        setUnreadCount(payload.unread_count || 0);
+      } catch {
+        // ignore notification fetch errors
+      }
+    })();
+  }, [grade?.students?.reg_no, authFetch]);
 
   /* ---------- Appeal ---------- */
   const handleAppeal = useCallback(async () => {
@@ -337,6 +368,18 @@ export const StudentMobileView: React.FC<{ gradeId: string }> = ({
   const pct = displayTotal > 0 ? (displayScore / displayTotal) * 100 : 0;
   const proficiency = proficiencyLabel(pct);
   const confidencePct = grade ? Math.round(grade.confidence * 100) : 0;
+  const markLossPoints = (grade?.feedback || []).filter((point) => {
+    const text = point.toLowerCase();
+    return (
+      text.includes("missing") ||
+      text.includes("incorrect") ||
+      text.includes("deduct") ||
+      text.includes("penalty") ||
+      text.includes("flaw") ||
+      text.includes("error") ||
+      point.includes("⚠")
+    );
+  });
 
   // Build sections from rubric
   const sections = rubric
@@ -438,8 +481,52 @@ export const StudentMobileView: React.FC<{ gradeId: string }> = ({
         <h1 className="text-[11px] font-black uppercase tracking-[0.25em] text-white/40 italic">
           AuraGrade Results
         </h1>
-        <div className="w-10" />
+        <button
+          onClick={() => {
+            const next = !showNotifications;
+            setShowNotifications(next);
+            if (next && grade?.students?.reg_no) {
+              const key = `auragrade_notifications_last_seen_${grade.students.reg_no}`;
+              localStorage.setItem(key, new Date().toISOString());
+              setUnreadCount(0);
+            }
+          }}
+          className="relative p-2.5 bg-white/5 rounded-full active:scale-90 transition-transform"
+        >
+          <Bell className="h-5 w-5 text-white/60" />
+          {unreadCount > 0 && (
+            <span className="absolute -top-1 -right-1 min-w-4 h-4 px-1 rounded-full bg-red-500 text-white text-[9px] font-bold flex items-center justify-center">
+              {unreadCount}
+            </span>
+          )}
+        </button>
       </div>
+
+      <AnimatePresence>
+        {showNotifications && (
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            className="mx-5 mt-3 bg-slate-900/95 border border-white/[0.08] rounded-2xl p-4"
+          >
+            <p className="text-[10px] text-white/40 uppercase tracking-wider mb-2">Notification Center</p>
+            <div className="space-y-2 max-h-52 overflow-auto">
+              {notifications.length === 0 ? (
+                <p className="text-xs text-white/30">No appeal updates yet.</p>
+              ) : (
+                notifications.map((n) => (
+                  <div key={n.id} className={`rounded-xl border px-3 py-2 ${n.is_unread ? "border-red-500/20 bg-red-500/5" : "border-white/[0.08] bg-white/[0.02]"}`}>
+                    <p className="text-xs text-white/80 font-medium">{n.title}</p>
+                    <p className="text-[11px] text-white/50 mt-1">{n.message}</p>
+                    <p className="text-[11px] text-cyan-300/80 mt-1">Teacher note: {n.teacher_note}</p>
+                  </div>
+                ))
+              )}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <div className="px-5 pt-6 space-y-6">
         {/* ── Student & Assessment Info ── */}
@@ -462,6 +549,32 @@ export const StudentMobileView: React.FC<{ gradeId: string }> = ({
             {badge.icon}
             {badge.label}
           </div>
+        </motion.div>
+
+        {/* ── Why Marks Were Lost ── */}
+        <motion.div
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.55 }}
+          className="bg-amber-500/5 border border-amber-500/15 rounded-3xl p-5"
+        >
+          <div className="flex items-center gap-3 mb-3">
+            <div className="p-2 bg-amber-500/15 rounded-xl">
+              <AlertTriangle className="w-5 h-5 text-amber-400" />
+            </div>
+            <h3 className="font-bold text-[15px] text-white/90">Where You Lost Marks</h3>
+          </div>
+          {markLossPoints.length === 0 ? (
+            <p className="text-sm text-emerald-300/80">No explicit mark deductions were detected in the AI trace.</p>
+          ) : (
+            <div className="space-y-2">
+              {markLossPoints.map((point, i) => (
+                <div key={i} className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-3.5 py-2.5 text-[13px] text-amber-200/90 leading-relaxed">
+                  {point}
+                </div>
+              ))}
+            </div>
+          )}
         </motion.div>
 
         {/* ── Hero Circular Progress ── */}
@@ -765,7 +878,7 @@ export const StudentMobileView: React.FC<{ gradeId: string }> = ({
               onClick={() => setShowAppeal(true)}
               className="flex items-center justify-center gap-2 py-4 bg-rose-500/10 border border-rose-500/20 text-rose-400 rounded-2xl font-black text-[13px] uppercase italic active:scale-95 transition-transform"
             >
-              <MessageSquareWarning className="w-4 h-4" /> Appeal
+              <MessageSquareWarning className="w-4 h-4" /> Appeal for Transparency
             </button>
           ) : grade.prof_status === "Flagged" ? (
             <button
@@ -845,7 +958,7 @@ export const StudentMobileView: React.FC<{ gradeId: string }> = ({
                     Request Re-evaluation
                   </h3>
                   <p className="text-[11px] text-slate-400 mb-5 leading-relaxed">
-                    Explain why you believe the AI missed a valid point. The
+                    Explain exactly where your answer meets the rubric and why marks should be restored. The
                     &ldquo;Supreme Court&rdquo; Audit Agent will review it
                     independently.
                   </p>

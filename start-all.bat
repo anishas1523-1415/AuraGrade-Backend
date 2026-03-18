@@ -1,0 +1,6 @@
+@echo off
+echo Starting Backend...
+start cmd /k "start-backend.bat"
+echo Starting Frontend...
+start cmd /k "start-frontend.bat"
+echo Both services are starting in separate windows.
