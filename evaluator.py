@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import asyncio
+import importlib
 from typing import AsyncGenerator, Optional
 
 from google import genai
@@ -62,6 +63,39 @@ def _get_pinecone_index():
 # ---------------------------------------------------------------------------
 
 _gemini_client: genai.Client | None = None
+HUMAN_REVIEW_CONFIDENCE_THRESHOLD = int(os.environ.get("HUMAN_REVIEW_CONFIDENCE_THRESHOLD", "85"))
+
+PASS1_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "registration_number": {"type": "string"},
+        "per_question_scores": {"type": "object"},
+        "score": {"type": "number"},
+        "confidence": {"type": "number"},
+        "confidence_score": {"type": "number"},
+        "human_review_required": {"type": "boolean"},
+        "detected_key_terms": {"type": "array", "items": {"type": "string"}},
+        "penalties_applied": {"type": "array", "items": {"type": "string"}},
+        "justification_note": {"type": "string"},
+        "feedback": {"type": "array", "items": {"type": "string"}},
+        "is_flagged": {"type": "boolean"},
+        "spatial_annotations": {"type": "array", "items": {"type": "object"}},
+    },
+    "required": ["score", "confidence", "feedback", "is_flagged"],
+}
+
+PASS2_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "score": {"type": "number"},
+        "confidence": {"type": "number"},
+        "feedback": {"type": "array", "items": {"type": "string"}},
+        "is_flagged": {"type": "boolean"},
+        "audit_notes": {"type": "string"},
+        "annotation_verdicts": {"type": "array", "items": {"type": "object"}},
+    },
+    "required": ["score", "confidence", "feedback", "is_flagged"],
+}
 
 
 def get_gemini_client() -> genai.Client:
@@ -110,8 +144,8 @@ def _get_bm25_encoder():
         return _bm25_encoder
 
     try:
-        from pinecone_text.sparse import BM25Encoder
-
+        sparse_module = importlib.import_module("pinecone_text.sparse")
+        BM25Encoder = getattr(sparse_module, "BM25Encoder")
         _bm25_encoder = BM25Encoder().default()
         print("✅ BM25 encoder initialised — hybrid search enabled")
         return _bm25_encoder
@@ -271,6 +305,72 @@ def _sse_event(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def normalize_grade_result(
+    result: dict | None,
+    *,
+    fallback: dict | None = None,
+    default_registration: str = "FLAG_FOR_MANUAL",
+    confidence_threshold: int = HUMAN_REVIEW_CONFIDENCE_THRESHOLD,
+) -> dict:
+    """Normalize grading JSON to a strict, frontend-safe shape with review routing."""
+    merged: dict = {}
+    if isinstance(fallback, dict):
+        merged.update(fallback)
+    if isinstance(result, dict):
+        merged.update(result)
+
+    score = _safe_float(merged.get("score"), 0.0)
+    confidence = _safe_float(merged.get("confidence"), 0.0)
+
+    # Accept either 0-1 or 0-100 confidence outputs from model.
+    if confidence > 1:
+        confidence = confidence / 100.0
+    confidence = min(max(confidence, 0.0), 1.0)
+
+    confidence_score_raw = _safe_float(merged.get("confidence_score"), confidence * 100)
+    if confidence_score_raw <= 1:
+        confidence_score_raw *= 100
+    confidence_score = int(round(min(max(confidence_score_raw, 0), 100)))
+
+    feedback_raw = merged.get("feedback", [])
+    if isinstance(feedback_raw, list):
+        feedback = [str(item) for item in feedback_raw]
+    elif feedback_raw is None:
+        feedback = []
+    else:
+        feedback = [str(feedback_raw)]
+
+    is_flagged = bool(merged.get("is_flagged", False))
+    human_review_required = (
+        bool(merged.get("human_review_required", False))
+        or confidence_score < confidence_threshold
+        or is_flagged
+    )
+
+    normalized = {
+        **merged,
+        "score": round(score, 2),
+        "confidence": confidence,
+        "confidence_score": confidence_score,
+        "feedback": feedback,
+        "is_flagged": is_flagged,
+        "human_review_required": human_review_required,
+        "review_status": "NEEDS_HUMAN_REVIEW" if human_review_required else "GRADED",
+        "registration_number": merged.get("registration_number") or default_registration,
+        "per_question_scores": merged.get("per_question_scores", {}) if isinstance(merged.get("per_question_scores", {}), dict) else {},
+        "penalties_applied": merged.get("penalties_applied", []) if isinstance(merged.get("penalties_applied", []), list) else [],
+        "justification_note": str(merged.get("justification_note", "") or ""),
+    }
+    return normalized
+
+
 # ---------------------------------------------------------------------------
 #  Dynamic Prompt Generator — Subject-Agnostic Grading Engine
 # ---------------------------------------------------------------------------
@@ -303,6 +403,7 @@ def generate_grader_prompt(
     str
         The complete grader prompt ready to send to Gemini.
     """
+    review_threshold = HUMAN_REVIEW_CONFIDENCE_THRESHOLD
     return f"""You are an expert University Professor evaluating an Internal Assessment.
 You are strict, highly accurate, and leave no room for bias.
 
@@ -365,7 +466,7 @@ Output your response strictly in the following JSON format:
     "score": <float — total of all per-question scores>,
     "confidence": <float 0-1>,
     "confidence_score": <integer 0-100 — percentage reflecting how confident you are in this evaluation based on handwriting clarity and answer ambiguity>,
-    "human_review_required": <boolean — set to true if confidence_score is below 80>,
+    "human_review_required": <boolean — set to true if confidence_score is below {review_threshold}>,
     "detected_key_terms": ["term1", "term2"],
     "penalties_applied": [
         "<description of any critical penalty applied>"
@@ -665,6 +766,7 @@ Deduct marks for genuine logic flaws identified above.
                     ],
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
+                        response_schema=PASS1_RESPONSE_SCHEMA,
                         media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
                     ),
                 )
@@ -711,18 +813,12 @@ Deduct marks for genuine logic flaws identified above.
                 "phase": "pass1_fallback",
             })
 
-        pass1_result.setdefault("score", 0.0)
-        pass1_result.setdefault("confidence", 0.0)
-        pass1_result.setdefault("confidence_score", round(pass1_result.get("confidence", 0.0) * 100))
-        pass1_result.setdefault("human_review_required", pass1_result.get("confidence_score", 0) < 80)
-        pass1_result.setdefault("feedback", [])
-        pass1_result.setdefault("is_flagged", False)
+        pass1_result = normalize_grade_result(
+            pass1_result,
+            default_registration=student_reg_no or "FLAG_FOR_MANUAL",
+        )
         pass1_result.setdefault("detected_key_terms", [])
         pass1_result.setdefault("spatial_annotations", [])
-        pass1_result.setdefault("registration_number", student_reg_no or "FLAG_FOR_MANUAL")
-        pass1_result.setdefault("per_question_scores", {})
-        pass1_result.setdefault("penalties_applied", [])
-        pass1_result.setdefault("justification_note", "")
 
         # ── DETERMINISTIC MATH: Never trust LLM's total score ─────
         # LLMs are reasoning engines, not calculators. Recalculate
@@ -794,7 +890,7 @@ Deduct marks for genuine logic flaws identified above.
 
         yield _sse_event("step", {
             "icon": "📊",
-            "text": f"Pass 1 complete — initial score: {pass1_result['score']}/10 (confidence {pass1_result['confidence']:.0%})",
+            "text": f"Pass 1 complete — initial score: {pass1_result['score']}/15 (confidence {pass1_result['confidence']:.0%})",
             "phase": "pass1_done",
         })
 
@@ -923,6 +1019,7 @@ Output strictly in JSON:
                     ],
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
+                        response_schema=PASS2_RESPONSE_SCHEMA,
                         media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
                     ),
                 )
@@ -964,10 +1061,11 @@ Output strictly in JSON:
                 "phase": "pass2_fallback",
             })
 
-        pass2_result.setdefault("score", pass1_result["score"])
-        pass2_result.setdefault("confidence", pass1_result["confidence"])
-        pass2_result.setdefault("feedback", pass1_result["feedback"])
-        pass2_result.setdefault("is_flagged", pass1_result["is_flagged"])
+        pass2_result = normalize_grade_result(
+            pass2_result,
+            fallback=pass1_result,
+            default_registration=pass1_result.get("registration_number", student_reg_no or "FLAG_FOR_MANUAL"),
+        )
         pass2_result.setdefault("audit_notes", "No corrections needed.")
         pass2_result.setdefault("annotation_verdicts", [])
 
@@ -1002,13 +1100,13 @@ Output strictly in JSON:
         if score_changed:
             yield _sse_event("step", {
                 "icon": "✏️",
-                "text": f"Audit adjusted score: {pass1_result['score']} → {pass2_result['score']}/10",
+                "text": f"Audit adjusted score: {pass1_result['score']} → {pass2_result['score']}/15",
                 "phase": "pass2_correction",
             })
         else:
             yield _sse_event("step", {
                 "icon": "✅",
-                "text": f"Audit confirmed score: {pass2_result['score']}/10 — {audit_notes}",
+                "text": f"Audit confirmed score: {pass2_result['score']}/15 — {audit_notes}",
                 "phase": "pass2_confirmed",
             })
 
@@ -1085,15 +1183,16 @@ Output strictly in JSON:
             # Fallback: use audit score if no per-question breakdown
             deterministic_score = pass2_result["score"]
 
-        # Derive confidence_score from pass2 confidence if not already set
-        confidence_score = pass1_result.get("confidence_score", round(pass2_result["confidence"] * 100))
-        human_review_required = pass1_result.get("human_review_required", confidence_score < 80)
+        # Always base human review routing on FINAL normalized confidence.
+        confidence_score = pass2_result["confidence_score"]
+        human_review_required = pass2_result["human_review_required"]
 
         final_result = {
             "score": deterministic_score,
             "confidence": pass2_result["confidence"],
             "confidence_score": confidence_score,
             "human_review_required": human_review_required,
+            "review_status": pass2_result["review_status"],
             "sentinel_triggered": sentinel_report.get("sentinel_triggered", False),
             "max_similarity_score": sentinel_report.get("max_similarity_score", 0.0),
             "feedback": pass2_result["feedback"],

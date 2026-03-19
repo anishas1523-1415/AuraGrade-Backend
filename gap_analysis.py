@@ -150,7 +150,7 @@ performance of {total_scripts} students on an examination.
 ## Context
 - **Subject**: {subject}
 - **Assessment**: {title}
-- **Average Score**: {avg_score}/10
+- **Average Score**: {avg_score}/15
 - **Total Scripts Analyzed**: {total_scripts}
 
 ## Rubric Used for Grading

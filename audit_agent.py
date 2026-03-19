@@ -290,19 +290,19 @@ As Head of Department, you must:
         if verdict == "Adjusted Up":
             yield _sse_event("step", {
                 "icon": "📈",
-                "text": f"Verdict: {verdict} — Score adjusted {original_score} → {new_score}/10 (+{score_delta:.1f})",
+                "text": f"Verdict: {verdict} — Score adjusted {original_score} → {new_score}/15 (+{score_delta:.1f})",
                 "phase": "verdict_up",
             })
         elif verdict == "Adjusted Down":
             yield _sse_event("step", {
                 "icon": "📉",
-                "text": f"Verdict: {verdict} — Score adjusted {original_score} → {new_score}/10 ({score_delta:+.1f})",
+                "text": f"Verdict: {verdict} — Score adjusted {original_score} → {new_score}/15 ({score_delta:+.1f})",
                 "phase": "verdict_down",
             })
         else:
             yield _sse_event("step", {
                 "icon": "⚖️",
-                "text": f"Verdict: {verdict} — Original score {original_score}/10 stands",
+                "text": f"Verdict: {verdict} — Original score {original_score}/15 stands",
                 "phase": "verdict_upheld",
             })
 

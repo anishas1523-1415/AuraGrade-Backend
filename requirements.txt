@@ -11,3 +11,6 @@ numpy
 pinecone
 pinecone-text
 pydantic
+mcp
+python-dotenv
+tenacity

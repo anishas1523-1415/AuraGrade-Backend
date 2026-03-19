@@ -36,78 +36,121 @@ logger = logging.getLogger("auragrade.retry")
 #  API Key Pool — automatic failover across multiple Gemini keys
 # ---------------------------------------------------------------------------
 
-_key_pool: list[str] = []
-_key_index: int = 0
-_key_lock = threading.Lock()
-_key_cooldown: dict[int, float] = {}  # key_index → timestamp when usable again
+import time
+import threading
 
+class AuraGradeKeyManager:
+    def __init__(self, api_keys):
+        self.key_pool = [{"key": k, "active": True, "retry_at": 0, "fail_count": 0} for k in api_keys]
+        self.current_index = 0
+        self.lock = threading.Lock()
+        self.last_used_key = None  # Track the key that was last used
+
+    def get_working_key(self):
+        now = time.time()
+        with self.lock:
+            # Refresh any keys whose cooldown has expired
+            for item in self.key_pool:
+                if not item["active"] and now > item["retry_at"]:
+                    item["active"] = True
+                    item["fail_count"] = 0  # Reset fail count on cooldown expiry
+            
+            # Find the next active key (round-robin)
+            for _ in range(len(self.key_pool)):
+                item = self.key_pool[self.current_index]
+                self.current_index = (self.current_index + 1) % len(self.key_pool)
+                if item["active"]:
+                    self.last_used_key = item["key"]
+                    return item
+            
+            return None  # All keys exhausted
+
+    def get_last_used_key(self) -> str | None:
+        """Return the key that was most recently used."""
+        return self.last_used_key
+
+    def mark_exhausted(self, key, cooldown_secs=30.0):
+        """Mark a key as exhausted with shorter cooldown (30s default since we have many keys)."""
+        with self.lock:
+            for item in self.key_pool:
+                if item["key"] == key:
+                    item["active"] = False
+                    item["fail_count"] += 1
+                    # Increase cooldown for keys that fail repeatedly
+                    actual_cooldown = cooldown_secs * min(item["fail_count"], 3)
+                    item["retry_at"] = time.time() + actual_cooldown
+                    logger.warning(f"Key {key[:8]}... marked exhausted (fail #{item['fail_count']}), cooldown {actual_cooldown}s")
+                    break
+
+    def get_active_key_count(self) -> int:
+        """Return how many keys are currently active."""
+        now = time.time()
+        with self.lock:
+            return sum(1 for item in self.key_pool if item["active"] or now >= item["retry_at"])
+
+    def get_quota_wait_seconds(self) -> float:
+        now = time.time()
+        with self.lock:
+            if not self.key_pool: return 0
+            for item in self.key_pool:
+                if item["active"] or now >= item["retry_at"]:
+                    return 0
+            earliest = min(item["retry_at"] for item in self.key_pool)
+            return max(0, earliest - now)
+
+_key_manager = None
+_key_pool = []  # Expose for backward-compatibility
 
 def init_key_pool():
-    """Build the key pool from environment variables on startup."""
-    global _key_pool
+    """Build the key pool from environment variables (or array) on startup."""
+    global _key_manager, _key_pool
     keys = []
     primary = os.environ.get("GEMINI_API_KEY", "")
     if primary:
         keys.append(primary)
-    # Support GEMINI_API_KEY_2, _3, etc.
+
+    # Optional comma-separated key list for easier deployment configuration.
+    # Example: GEMINI_API_KEYS="keyA,keyB,keyC"
+    key_list = os.environ.get("GEMINI_API_KEYS", "")
+    if key_list:
+        for item in key_list.split(","):
+            key = item.strip()
+            if key and key not in keys:
+                keys.append(key)
+
     for i in range(2, 10):
         k = os.environ.get(f"GEMINI_API_KEY_{i}", "")
-        if k:
+        if k and k not in keys:
             keys.append(k)
+
+    if not keys:
+        logger.warning("No Gemini API keys configured. Set GEMINI_API_KEY or GEMINI_API_KEYS.")
+
+    _key_manager = AuraGradeKeyManager(keys)
     _key_pool = keys
     if len(keys) > 1:
-        print(f"✅ Gemini key pool: {len(keys)} keys loaded (failover enabled)")
+        print(f"SUCCESS: Gemini key pool: {len(keys)} keys loaded (AuraGradeKeyManager failover enabled)")
     elif len(keys) == 1:
-        print("✅ Gemini key pool: 1 key loaded")
-    else:
-        print("⚠️  No GEMINI_API_KEY found in environment")
-
+        print("SUCCESS: Gemini key pool: 1 key loaded")
 
 def _rotate_client():
-    """Get a fresh genai.Client using the next available key.
-    Skips keys in cooldown.  Returns None if ALL keys are in cooldown."""
-    global _key_index
-    if not _key_pool:
+    if not _key_manager or not _key_pool:
         return None
-    import time
-    now = time.time()
-    with _key_lock:
-        for _ in range(len(_key_pool)):
-            idx = _key_index % len(_key_pool)
-            _key_index = (_key_index + 1) % len(_key_pool)
-            cooldown_until = _key_cooldown.get(idx, 0)
-            if now >= cooldown_until:
-                logger.info(f"Using API key #{idx + 1}")
-                return genai.Client(api_key=_key_pool[idx])
-    # ALL keys are in cooldown — return None so caller can handle
+    key_item = _key_manager.get_working_key()
+    if key_item:
+        logger.info(f"Using API key {key_item['key'][:8]}...")
+        return genai.Client(api_key=key_item["key"])
     return None
 
-
-def _mark_key_exhausted(key: str, cooldown_secs: float = 62.0):
-    """Mark a key as exhausted so it's skipped for `cooldown_secs`."""
-    import time
-    try:
-        idx = _key_pool.index(key)
-        with _key_lock:
-            _key_cooldown[idx] = time.time() + cooldown_secs
-            logger.warning(f"Key #{idx + 1} marked exhausted, cooldown {cooldown_secs}s")
-    except ValueError:
-        pass
-
+def _mark_key_exhausted(key: str, cooldown_secs: float = 30.0):
+    """Mark a key as exhausted. Shorter cooldown (30s) since we have multiple keys."""
+    if _key_manager:
+        _key_manager.mark_exhausted(key, cooldown_secs)
 
 def get_quota_wait_seconds() -> float:
-    """Return seconds until the earliest key exits cooldown (0 if a key is available now)."""
-    import time
-    if not _key_pool:
+    if not _key_manager:
         return 0
-    now = time.time()
-    with _key_lock:
-        for idx in range(len(_key_pool)):
-            if now >= _key_cooldown.get(idx, 0):
-                return 0  # at least one key is available
-        # All in cooldown — find the shortest remaining wait
-        earliest = min(_key_cooldown.values())
-        return max(0, earliest - now)
+    return _key_manager.get_quota_wait_seconds()
 
 # Retry on ClientError (429 rate-limit) and ServerError (5xx transient)
 _RETRYABLE = (genai_errors.ClientError, genai_errors.ServerError)
@@ -163,6 +206,9 @@ def call_gemini(client, *, model: str, contents: list, config) -> Any:
     QuotaExhaustedError
         When all keys are in cooldown.
     """
+    # Track which key we're using for proper exhaustion marking
+    current_key = _key_manager.get_last_used_key() if _key_manager else None
+    
     try:
         return client.models.generate_content(
             model=model,
@@ -173,28 +219,42 @@ def call_gemini(client, *, model: str, contents: list, config) -> Any:
         err_str = str(e)
         is_quota = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
 
-        if is_quota and _key_pool:
-            # Mark the key that just failed
-            with _key_lock:
-                exhausted_idx = (_key_index - 1) % len(_key_pool)
-            _mark_key_exhausted(_key_pool[exhausted_idx])
+        if is_quota and _key_manager:
+            # Mark the key that just failed using our tracking
+            if current_key:
+                _mark_key_exhausted(current_key)
+            
+            # Try ALL remaining active keys before giving up
+            max_key_attempts = len(_key_pool) if _key_pool else 0
+            for attempt in range(max_key_attempts):
+                alt_client = _rotate_client()
+                if not alt_client:
+                    break  # No more active keys
+                
+                new_key = _key_manager.get_last_used_key()
+                logger.info(f"Switching to API key {new_key[:8] if new_key else '?'}... (attempt {attempt + 2}/{max_key_attempts + 1})")
+                
+                try:
+                    return alt_client.models.generate_content(
+                        model=model,
+                        contents=contents,
+                        config=config,
+                    )
+                except genai_errors.ClientError as retry_exc:
+                    retry_err = str(retry_exc)
+                    if "429" in retry_err or "RESOURCE_EXHAUSTED" in retry_err:
+                        # This key is also exhausted, mark it and try next
+                        if new_key:
+                            _mark_key_exhausted(new_key)
+                        continue
+                    else:
+                        # Non-quota error, re-raise
+                        raise
 
-        # Try a different key immediately
-        alt_client = _rotate_client()
-        if alt_client:
-            logger.info("Switching to next API key after rate-limit...")
-            try:
-                return alt_client.models.generate_content(
-                    model=model,
-                    contents=contents,
-                    config=config,
-                )
-            except genai_errors.ClientError:
-                pass  # fall through
-
-        # If all keys exhausted, raise special error (don't block here)
-        if is_quota:
+            # All keys exhausted, raise special error
             wait = get_quota_wait_seconds()
+            active_count = _key_manager.get_active_key_count() if _key_manager else 0
+            logger.error(f"All {len(_key_pool)} API keys exhausted. Active: {active_count}. Wait: {wait}s")
             raise QuotaExhaustedError(wait) from e
 
         raise  # non-quota error → let tenacity retry
@@ -254,7 +314,7 @@ async def call_gemini_with_quota_retry(
             while remaining > 0:
                 if sse_callback:
                     await sse_callback({
-                        "icon": "⏳",
+                        "icon": "WAIT",
                         "text": f"API quota reached — waiting {int(remaining)}s for reset… (attempt {attempt + 2}/{max_quota_retries + 1})",
                         "phase": "quota_wait",
                     })
@@ -268,7 +328,7 @@ async def call_gemini_with_quota_retry(
 
             if sse_callback:
                 await sse_callback({
-                    "icon": "🔄",
+                    "icon": "RETRY",
                     "text": "Retrying API call…",
                     "phase": "quota_retry",
                 })

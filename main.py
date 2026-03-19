@@ -3,6 +3,7 @@ import io
 import json
 import uuid
 import asyncio
+import hashlib
 from datetime import datetime, timezone
 
 # Load .env for local development
@@ -22,6 +23,7 @@ from auth_guard import require_auth, require_role, optional_auth
 
 from evaluator import (
     agentic_grade_stream,
+    normalize_grade_result,
     set_gemini_client,
     set_evaluator_supabase,
     upsert_model_answer,
@@ -62,8 +64,78 @@ from similarity_sentinel import (
     index_student_submission,
     scan_assessment_collusion,
 )
+from mcp_tools import (
+    create_mcp_asgi_app,
+    set_mcp_supabase_client,
+    get_recent_sealed_records,
+    MCP_AVAILABLE,
+)
 
 app = FastAPI()
+
+ALLOWED_SUBJECT_KEYWORDS = [
+    s.strip().lower()
+    for s in os.environ.get(
+        "ALLOWED_SUBJECT_KEYWORDS",
+        "ai,data science,computer science,cs,python,sql,data structures,algorithms",
+    ).split(",")
+    if s.strip()
+]
+GRADE_STREAM_CACHE_MAX = 500
+_grade_stream_idempotency_cache: dict[str, dict] = {}
+EVALUATE_SSE_CACHE_MAX = 500
+_evaluate_sse_idempotency_cache: dict[str, dict] = {}
+
+
+def _is_allowed_subject(subject: str | None) -> bool:
+    value = (subject or "").strip().lower()
+    return bool(value) and any(keyword in value for keyword in ALLOWED_SUBJECT_KEYWORDS)
+
+
+def _ensure_allowed_subject(subject: str | None):
+    if not _is_allowed_subject(subject):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "AuraGrade is currently scope-locked to AI/Data Science/Computer Science assessments. "
+                f"Allowed keywords: {', '.join(ALLOWED_SUBJECT_KEYWORDS)}"
+            ),
+        )
+
+
+GRADE_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "score": {"type": "number"},
+        "confidence": {"type": "number"},
+        "feedback": {"type": "array", "items": {"type": "string"}},
+        "is_flagged": {"type": "boolean"},
+        "per_question_scores": {"type": "object"},
+    },
+    "required": ["score", "confidence", "feedback", "is_flagged"],
+}
+
+VOICE_RUBRIC_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "criteria": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "criteria": {"type": "string"},
+                    "max_marks": {"type": "number"},
+                    "description": {"type": "string"},
+                },
+                "required": ["criteria", "max_marks", "description"],
+            },
+        }
+    },
+    "required": ["criteria"],
+}
+
+STRICT_EVAL_CACHE_MAX = 500
+_strict_eval_idempotency_cache: dict[str, dict] = {}
 
 # Enable CORS for your Next.js frontend
 app.add_middleware(
@@ -99,6 +171,17 @@ if supabase_url and supabase_key:
 else:
     print("⚠️  Supabase credentials not set — running without database persistence")
 
+# Share Supabase with MCP tool layer (if available)
+set_mcp_supabase_client(supabase)
+
+# Mount MCP server transport (SSE/HTTP, SDK-dependent)
+mcp_asgi_app = create_mcp_asgi_app()
+if mcp_asgi_app:
+    app.mount("/mcp", mcp_asgi_app)
+    print("✅ MCP tools available at /mcp")
+elif not MCP_AVAILABLE:
+    print("⚠️  MCP SDK not installed — /mcp endpoint disabled")
+
 # Report Pinecone status
 if os.environ.get("PINECONE_API_KEY"):
     print("✅ Pinecone API key detected — RAG enabled")
@@ -126,6 +209,38 @@ state = ExamState()
 @app.get("/")
 def read_root():
     return {"status": "AuraGrade AI Engine is Online. Ready for IA-1 bundles."}
+
+
+@app.get("/api/system/readiness")
+def system_readiness():
+    """Operational readiness snapshot for deployment and enterprise checks."""
+    return {
+        "service": "auragrade-backend",
+        "ready": True,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "features": {
+            "domain_scope_lock": True,
+            "confidence_routing_threshold": int(os.environ.get("HUMAN_REVIEW_CONFIDENCE_THRESHOLD", "85")),
+            "mcp_enabled": bool(mcp_asgi_app),
+            "supabase_connected": bool(supabase),
+            "pinecone_enabled": bool(os.environ.get("PINECONE_API_KEY")),
+        },
+        "allowed_subject_keywords": ALLOWED_SUBJECT_KEYWORDS,
+        "model_config": {
+            "primary_model": "gemini-3-flash-preview",
+            "structured_json_mode": True,
+        },
+    }
+
+
+@app.get("/api/ledger/recent-seals")
+def get_recent_mcp_seals(limit: int = Query(20, ge=1, le=100)):
+    """REST mirror for recent grade seals emitted via MCP tool calls."""
+    records = get_recent_sealed_records(limit)
+    return {
+        "count": len(records),
+        "records": records,
+    }
 
 
 # ─── Setup Exam: Professor Uploads Answer Key PDF ────────────
@@ -212,7 +327,10 @@ async def get_exam_state():
 # ─── Simplified Evaluate Endpoint (SSE) ──────────────────────
 
 @app.post("/api/evaluate")
-async def evaluate_script(file: UploadFile = File(...)):
+async def evaluate_script(
+    file: UploadFile = File(...),
+    idempotency_key: Optional[str] = Query(None, description="Client-generated idempotency key"),
+):
     """
     Simplified SSE endpoint for quick evaluations without student/assessment context.
     Accepts an image upload and streams the full agentic grading pipeline back.
@@ -222,6 +340,25 @@ async def evaluate_script(file: UploadFile = File(...)):
     """
     if not file:
         raise HTTPException(status_code=400, detail="No file uploaded.")
+
+    idem_key = (idempotency_key or "").strip() or None
+    if idem_key and idem_key in _evaluate_sse_idempotency_cache:
+        cached = _evaluate_sse_idempotency_cache[idem_key]
+
+        async def replay_generator():
+            yield f"event: step\ndata: {json.dumps({'icon': '♻️', 'text': 'Idempotent replay: returning cached evaluation', 'phase': 'idempotent_replay'})}\n\n"
+            yield f"event: result\ndata: {json.dumps(cached.get('result', {}))}\n\n"
+            yield f"event: done\ndata: {json.dumps({'status': 'complete', 'idempotent_replay': True})}\n\n"
+
+        return StreamingResponse(
+            replay_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     if not (file.content_type or "").startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image.")
@@ -245,6 +382,7 @@ async def evaluate_script(file: UploadFile = File(...)):
     mime_type = file.content_type or "image/jpeg"
 
     async def event_generator():
+        last_result = None
         try:
             # Pass the professor's rubric text into the grading pipeline
             async for event_str in agentic_grade_stream(
@@ -263,6 +401,7 @@ async def evaluate_script(file: UploadFile = File(...)):
                     try:
                         data_line = event_str.split("data: ", 1)[1].split("\n")[0]
                         final_data = json.loads(data_line)
+                        last_result = final_data
                         reg = (
                             final_data.get("registration_number")
                             or final_data.get("reg_no")
@@ -272,6 +411,11 @@ async def evaluate_script(file: UploadFile = File(...)):
                         print(f"💾 Saved result for {reg} to MockDatabase")
                     except Exception as parse_err:
                         print(f"⚠️  Could not save result to MockDB: {parse_err}")
+
+            if idem_key and last_result:
+                if len(_evaluate_sse_idempotency_cache) >= EVALUATE_SSE_CACHE_MAX:
+                    _evaluate_sse_idempotency_cache.pop(next(iter(_evaluate_sse_idempotency_cache)))
+                _evaluate_sse_idempotency_cache[idem_key] = {"result": last_result}
 
         except Exception as e:
             print(f"❌ Evaluation Error: {e}")
@@ -354,7 +498,7 @@ def save_grade_to_db(student_reg_no: str, assessment_id: str, ai_results: dict):
         "confidence": ai_results["confidence"],
         "feedback": ai_results["feedback"],
         "is_flagged": ai_results.get("is_flagged", False),
-        "prof_status": "Pending",
+        "prof_status": "Flagged" if ai_results.get("human_review_required") else "Pending",
     }
 
     response = (
@@ -390,6 +534,21 @@ async def grade_paper(
     user=Depends(require_auth),
 ):
     try:
+        if assessment_id and supabase:
+            try:
+                assessment_row = (
+                    supabase.table("assessments")
+                    .select("subject")
+                    .eq("id", assessment_id)
+                    .single()
+                    .execute()
+                )
+                _ensure_allowed_subject((assessment_row.data or {}).get("subject"))
+            except HTTPException:
+                raise
+            except Exception:
+                pass
+
         # 1. Read the uploaded image
         image_bytes = await file.read()
 
@@ -430,6 +589,7 @@ async def grade_paper(
             ],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
+                response_schema=GRADE_RESPONSE_SCHEMA,
                 media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
             ),
         )
@@ -456,6 +616,7 @@ async def grade_paper(
         ai_results.setdefault("feedback", [])
         ai_results.setdefault("is_flagged", False)
         ai_results.setdefault("per_question_scores", {})
+        ai_results = normalize_grade_result(ai_results, default_registration=student_reg_no or "FLAG_FOR_MANUAL")
 
         # ── DETERMINISTIC MATH: Never trust LLM's total score ─────
         # Use Python arithmetic to sum per-question scores instead of
@@ -488,6 +649,9 @@ async def grade_paper(
             return {
                 "score": 0.0,
                 "confidence": 0.0,
+                "confidence_score": 0,
+                "human_review_required": True,
+                "review_status": "NEEDS_HUMAN_REVIEW",
                 "status": "QUOTA_EXHAUSTED",
                 "feedback": ["⚠️ API quota full. Please wait 60 seconds and try again."],
                 "is_flagged": True,
@@ -497,6 +661,9 @@ async def grade_paper(
         return {
             "score": 0.0,
             "confidence": 0.0,
+            "confidence_score": 0,
+            "human_review_required": True,
+            "review_status": "NEEDS_HUMAN_REVIEW",
             "status": "ERROR",
             "feedback": [f"System error: {err_msg}"],
             "is_flagged": True,
@@ -512,6 +679,7 @@ async def grade_paper_stream(
     file: UploadFile = File(...),
     student_reg_no: Optional[str] = Query(None, description="Student register number"),
     assessment_id: Optional[str] = Query(None, description="Assessment UUID"),
+    idempotency_key: Optional[str] = Query(None, description="Client-generated idempotency key"),
 ):
     """
     Agentic two-pass grading with Server-Sent Events.
@@ -519,6 +687,42 @@ async def grade_paper_stream(
     The frontend opens this as an EventSource-compatible stream.
     Events: step, pass1, rag, pass2, result, error, done
     """
+    idem_key = (idempotency_key or "").strip() or None
+    if idem_key and idem_key in _grade_stream_idempotency_cache:
+        cached = _grade_stream_idempotency_cache[idem_key]
+
+        async def replay_generator():
+            yield f"event: step\ndata: {json.dumps({'icon': '♻️', 'text': 'Idempotent replay: returning cached grading result', 'phase': 'idempotent_replay'})}\n\n"
+            yield f"event: result\ndata: {json.dumps(cached.get('result', {}))}\n\n"
+            if cached.get("db"):
+                yield f"event: db\ndata: {json.dumps(cached['db'])}\n\n"
+            yield f"event: done\ndata: {json.dumps({'status': 'complete', 'idempotent_replay': True})}\n\n"
+
+        return StreamingResponse(
+            replay_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    if assessment_id and supabase:
+        try:
+            assessment_row = (
+                supabase.table("assessments")
+                .select("subject")
+                .eq("id", assessment_id)
+                .single()
+                .execute()
+            )
+            _ensure_allowed_subject((assessment_row.data or {}).get("subject"))
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+
     image_bytes = await file.read()
 
     # Reject excessively large files
@@ -621,6 +825,8 @@ async def grade_paper_stream(
     async def event_generator():
         """Wrap evaluator stream, then persist to DB at the end."""
         final_result = None
+        db_payload = None
+        db_payload = None
 
         async for event_str in agentic_grade_stream(
             image_bytes=image_bytes,
@@ -637,18 +843,56 @@ async def grade_paper_stream(
 
             yield event_str
 
-        # After stream completes — persist to Supabase
-        if final_result and student_reg_no and assessment_id:
-            try:
-                db_record = save_grade_to_db(
-                    student_reg_no, assessment_id, final_result
-                )
-                if db_record:
-                    yield f"event: db\ndata: {json.dumps({'saved': True, 'grade_id': db_record[0]['id']})}\n\n"
-                else:
-                    yield f"event: db\ndata: {json.dumps({'saved': False, 'reason': 'Student not found — routed to Exception Handling Dashboard'})}\n\n"
-            except Exception as exc:
-                yield f"event: db\ndata: {json.dumps({'saved': False, 'reason': str(exc)})}\n\n"
+        # After stream completes — persist to Supabase (or emit clear reason)
+        if final_result:
+            if not student_reg_no and not assessment_id:
+                db_payload = {
+                    "saved": False,
+                    "reason": "Missing student_reg_no and assessment_id",
+                }
+                yield f"event: db\ndata: {json.dumps(db_payload)}\n\n"
+            elif not student_reg_no:
+                db_payload = {
+                    "saved": False,
+                    "reason": "Missing student_reg_no",
+                }
+                yield f"event: db\ndata: {json.dumps(db_payload)}\n\n"
+            elif not assessment_id:
+                db_payload = {
+                    "saved": False,
+                    "reason": "Missing assessment_id",
+                }
+                yield f"event: db\ndata: {json.dumps(db_payload)}\n\n"
+            else:
+                try:
+                    db_record = save_grade_to_db(
+                        student_reg_no, assessment_id, final_result
+                    )
+                    if db_record:
+                        db_payload = {
+                            "saved": True,
+                            "grade_id": db_record[0]["id"],
+                        }
+                    else:
+                        db_payload = {
+                            "saved": False,
+                            "reason": "Student not found — routed to Exception Handling Dashboard",
+                        }
+                    yield f"event: db\ndata: {json.dumps(db_payload)}\n\n"
+                except Exception as exc:
+                    db_payload = {
+                        "saved": False,
+                        "reason": str(exc),
+                    }
+                    yield f"event: db\ndata: {json.dumps(db_payload)}\n\n"
+
+        if idem_key and final_result:
+            if len(_grade_stream_idempotency_cache) >= GRADE_STREAM_CACHE_MAX:
+                _grade_stream_idempotency_cache.pop(next(iter(_grade_stream_idempotency_cache)))
+            _grade_stream_idempotency_cache[idem_key] = {
+                "result": final_result,
+                "db": db_payload,
+            }
 
     return StreamingResponse(
         event_generator(),
@@ -663,7 +907,7 @@ async def grade_paper_stream(
 
 # ─── Pydantic models ─────────────────────────────────────────
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional as Opt
 
 
@@ -675,6 +919,189 @@ class SyncRubricBody(BaseModel):
 class CreateAssessmentBody(BaseModel):
     subject: str
     title: str
+
+
+class StrictEvaluateBody(BaseModel):
+    student_answer_text: str
+    course_rubric: str
+    student_id: Opt[str] = None
+    course_code: Opt[str] = None
+    assessment_id: Opt[str] = None
+    agent_reasoning: Opt[str] = None
+    evaluator: Opt[str] = "AuraGrade-Gemini-3-Flash"
+    idempotency_key: Opt[str] = None
+
+
+class CriterionFeedback(BaseModel):
+    criterion: str = Field(description="The specific rubric point")
+    score_awarded: float = Field(description="Marks given for this specific criterion")
+
+
+class EvaluationResult(BaseModel):
+    total_score: float = Field(description="The final calculated score out of 10")
+    criteria_breakdown: list[CriterionFeedback] = Field(description="Detailed breakdown of marks")
+    feedback_trace: str = Field(description="A concise explanation of why marks were deducted or awarded")
+    confidence_score: int = Field(description="An integer from 0 to 100 for confidence")
+
+
+@app.post("/api/evaluate_script")
+async def evaluate_script_strict(body: StrictEvaluateBody):
+    """
+    Strict JSON-mode evaluation endpoint.
+
+    Enforces Gemini structured output via a Pydantic response schema and
+    applies confidence routing for enterprise-safe grading.
+    """
+    if not body.student_answer_text.strip():
+        raise HTTPException(status_code=400, detail="student_answer_text is empty")
+    if not body.course_rubric.strip():
+        raise HTTPException(status_code=400, detail="course_rubric is empty")
+
+    idem_key = (body.idempotency_key or "").strip() or None
+    if idem_key and idem_key in _strict_eval_idempotency_cache:
+        return {
+            **_strict_eval_idempotency_cache[idem_key],
+            "idempotent_replay": True,
+        }
+
+    confidence_threshold = int(os.environ.get("HUMAN_REVIEW_CONFIDENCE_THRESHOLD", "85"))
+
+    prompt = f"""
+You are an expert AI & Data Science professor grading an exam.
+Evaluate the student answer strictly against the provided rubric.
+
+Rubric:
+{body.course_rubric}
+
+Student Answer:
+{body.student_answer_text}
+"""
+
+    try:
+        from gemini_retry import call_gemini_async, parse_response
+
+        response = await call_gemini_async(
+            client,
+            model="gemini-3-flash-preview",
+            contents=[prompt],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=EvaluationResult,
+                temperature=0.1,
+            ),
+        )
+
+        result_dict = parse_response(response)
+        if not result_dict or not isinstance(result_dict, dict):
+            raise HTTPException(status_code=422, detail="Could not parse structured evaluation JSON")
+
+        confidence_score = int(result_dict.get("confidence_score", 100))
+        if confidence_score < confidence_threshold:
+            response_payload = {
+                "status": "NEEDS_HUMAN_REVIEW",
+                "message": "Confidence too low to auto-grade.",
+                "partial_data": result_dict,
+            }
+            if idem_key:
+                if len(_strict_eval_idempotency_cache) >= STRICT_EVAL_CACHE_MAX:
+                    _strict_eval_idempotency_cache.pop(next(iter(_strict_eval_idempotency_cache)))
+                _strict_eval_idempotency_cache[idem_key] = response_payload
+            return response_payload
+
+        # Seal successful strict evaluation with SHA-256
+        seal_payload = {
+            "student_id": body.student_id or "UNKNOWN",
+            "course_code": body.course_code or "UNSPECIFIED",
+            "assessment_id": body.assessment_id,
+            "total_score": result_dict.get("total_score"),
+            "criteria_breakdown": result_dict.get("criteria_breakdown", []),
+            "feedback_trace": result_dict.get("feedback_trace", ""),
+            "confidence_score": result_dict.get("confidence_score"),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "evaluator": body.evaluator or "AuraGrade-Gemini-3-Flash",
+            "agent_reasoning": body.agent_reasoning or "strict-json-evaluation",
+        }
+        seal_bytes = json.dumps(seal_payload, sort_keys=True).encode("utf-8")
+        transaction_hash = generate_integrity_hash(seal_bytes)
+
+        persisted_to_ledger = False
+        ledger_error = None
+
+        # Persist to institutional ledger_hashes when assessment_id is available
+        if supabase and body.assessment_id:
+            try:
+                filename = (
+                    f"strict-eval-idem-{idem_key}.json"
+                    if idem_key
+                    else f"strict-eval-{(body.student_id or 'unknown')}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}.json"
+                )
+
+                if idem_key:
+                    existing = (
+                        supabase.table("ledger_hashes")
+                        .select("sha256_hash")
+                        .eq("assessment_id", body.assessment_id)
+                        .eq("filename", filename)
+                        .limit(1)
+                        .execute()
+                    )
+                    if existing.data:
+                        response_payload = {
+                            "status": "SUCCESS",
+                            "data": result_dict,
+                            "transaction_hash": existing.data[0].get("sha256_hash") or transaction_hash,
+                            "sealed_payload": {
+                                "student_id": seal_payload["student_id"],
+                                "course_code": seal_payload["course_code"],
+                                "assessment_id": seal_payload["assessment_id"],
+                                "timestamp": seal_payload["timestamp"],
+                                "evaluator": seal_payload["evaluator"],
+                            },
+                            "persisted_to_ledger": True,
+                            "ledger_error": None,
+                            "idempotent_replay": True,
+                        }
+                        if idem_key:
+                            if len(_strict_eval_idempotency_cache) >= STRICT_EVAL_CACHE_MAX:
+                                _strict_eval_idempotency_cache.pop(next(iter(_strict_eval_idempotency_cache)))
+                            _strict_eval_idempotency_cache[idem_key] = response_payload
+                        return response_payload
+
+                supabase.table("ledger_hashes").insert({
+                    "assessment_id": body.assessment_id,
+                    "filename": filename,
+                    "format": "json",
+                    "sha256_hash": transaction_hash,
+                    "record_count": 1,
+                    "generated_by": "strict_eval_api",
+                }).execute()
+                persisted_to_ledger = True
+            except Exception as exc:
+                ledger_error = str(exc)
+
+        response_payload = {
+            "status": "SUCCESS",
+            "data": result_dict,
+            "transaction_hash": transaction_hash,
+            "sealed_payload": {
+                "student_id": seal_payload["student_id"],
+                "course_code": seal_payload["course_code"],
+                "assessment_id": seal_payload["assessment_id"],
+                "timestamp": seal_payload["timestamp"],
+                "evaluator": seal_payload["evaluator"],
+            },
+            "persisted_to_ledger": persisted_to_ledger,
+            "ledger_error": ledger_error,
+        }
+        if idem_key:
+            if len(_strict_eval_idempotency_cache) >= STRICT_EVAL_CACHE_MAX:
+                _strict_eval_idempotency_cache.pop(next(iter(_strict_eval_idempotency_cache)))
+            _strict_eval_idempotency_cache[idem_key] = response_payload
+        return response_payload
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ─── Sync Rubric & Model Answer (Ground Truth) ───────────────
@@ -761,6 +1188,9 @@ async def upload_rubric_pdf(
     pdf_bytes = await file.read()
     if len(pdf_bytes) == 0:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    if subject_hint:
+        _ensure_allowed_subject(subject_hint)
 
     # If subject_hint not provided, try to get it from the assessment
     if not subject_hint and supabase:
@@ -881,6 +1311,7 @@ Rules:
             contents=[prompt],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
+                response_schema=VOICE_RUBRIC_SCHEMA,
                 temperature=0.1,
             ),
         )
@@ -913,6 +1344,7 @@ async def create_assessment(body: CreateAssessmentBody):
     """Create a new assessment."""
     if not supabase:
         raise HTTPException(status_code=503, detail="Database not configured")
+    _ensure_allowed_subject(body.subject)
 
     result = (
         supabase.table("assessments")
@@ -1016,6 +1448,97 @@ async def get_student_grades(reg_no: str):
     return {
         "student": student.data,
         "grades": grades.data or [],
+    }
+
+
+@app.get("/api/students/{reg_no}/notifications")
+async def get_student_notifications(
+    reg_no: str,
+    since: Optional[str] = Query(None, description="ISO timestamp for unread calculation"),
+):
+    """
+    In-app notification feed for student appeal outcomes.
+    Returns notifications for grades that had an appeal and were later reviewed.
+    """
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    student = (
+        supabase.table("students")
+        .select("id, reg_no, name")
+        .eq("reg_no", reg_no)
+        .single()
+        .execute()
+    )
+    if not student.data:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    grades = (
+        supabase.table("grades")
+        .select("id, ai_score, prof_status, reviewed_at, appeal_reason, audit_notes, audit_feedback, assessments(subject, title)")
+        .eq("student_id", student.data["id"])
+        .not_.is_("appeal_reason", "null")
+        .not_.is_("reviewed_at", "null")
+        .in_("prof_status", ["Approved", "Overridden", "Audited"])
+        .order("reviewed_at", desc=True)
+        .execute()
+    )
+
+    since_dt = None
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        except Exception:
+            since_dt = None
+
+    notifications = []
+    unread_count = 0
+
+    for row in (grades.data or []):
+        assessment = row.get("assessments") or {}
+        audit_notes_raw = row.get("audit_notes")
+        teacher_note = "Your appeal was reviewed. Tap to view full details."
+        if audit_notes_raw:
+            try:
+                parsed = json.loads(audit_notes_raw) if isinstance(audit_notes_raw, str) else audit_notes_raw
+                teacher_note = parsed.get("recommendation") or teacher_note
+            except Exception:
+                pass
+        elif row.get("audit_feedback"):
+            feedback = row.get("audit_feedback") or []
+            if isinstance(feedback, list) and feedback:
+                teacher_note = str(feedback[0])
+
+        reviewed_at = row.get("reviewed_at")
+        is_unread = False
+        if since_dt and reviewed_at:
+            try:
+                reviewed_dt = datetime.fromisoformat(str(reviewed_at).replace("Z", "+00:00"))
+                is_unread = reviewed_dt > since_dt
+            except Exception:
+                is_unread = False
+
+        if is_unread:
+            unread_count += 1
+
+        notifications.append({
+            "id": f"appeal-{row.get('id')}",
+            "grade_id": row.get("id"),
+            "type": "APPEAL_RESOLVED",
+            "title": f"Appeal reviewed: {assessment.get('subject', 'Assessment')}",
+            "message": f"Updated score: {row.get('ai_score')} · Status: {row.get('prof_status')}",
+            "teacher_note": teacher_note,
+            "status": row.get("prof_status"),
+            "updated_score": row.get("ai_score"),
+            "assessment_title": assessment.get("title"),
+            "reviewed_at": reviewed_at,
+            "is_unread": is_unread,
+        })
+
+    return {
+        "student": student.data,
+        "unread_count": unread_count,
+        "notifications": notifications,
     }
 
 
@@ -1289,6 +1812,127 @@ async def appeal_grade(grade_id: str, reason: str = Query(..., description="Reas
         changed_by="student",
     )
     return {"message": "Appeal submitted — professor will be notified", "data": result.data[0]}
+
+
+class StaffAppealResolveBody(BaseModel):
+    new_score: float
+    professor_notes: str
+    resolved_by: Opt[str] = "PROF_DEMO"
+
+
+@app.get("/api/staff/appeals/pending")
+async def list_pending_appeals(limit: int = Query(50, ge=1, le=200)):
+    """Sprint RBAC staff queue: only grades with pending student appeals."""
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    result = (
+        supabase.table("grades")
+        .select("id, ai_score, confidence, feedback, appeal_reason, prof_status, graded_at, students(reg_no, name), assessments(id, subject, title)")
+        .eq("prof_status", "Flagged")
+        .not_.is_("appeal_reason", "null")
+        .order("graded_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return result.data or []
+
+
+@app.put("/api/staff/appeals/{grade_id}/resolve")
+async def resolve_pending_appeal(grade_id: str, body: StaffAppealResolveBody):
+    """
+    Staff Resolution Engine: override appealed score and reseal with a new SHA-256 hash.
+    """
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    current = (
+        supabase.table("grades")
+        .select("id, ai_score, assessment_id, appeal_reason, students(reg_no, name), assessments(subject, title)")
+        .eq("id", grade_id)
+        .single()
+        .execute()
+    )
+    if not current.data:
+        raise HTTPException(status_code=404, detail="Grade not found")
+
+    row = current.data
+    old_score = row.get("ai_score")
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    audit_notes_payload = {
+        "verdict": (
+            "Adjusted Up"
+            if body.new_score > (old_score or 0)
+            else "Adjusted Down"
+            if body.new_score < (old_score or 0)
+            else "Upheld"
+        ),
+        "recommendation": body.professor_notes,
+        "rubric_breakdown": {},
+        "original_score": old_score,
+        "appeal_resolution": True,
+        "resolved_by": body.resolved_by,
+        "resolved_at": now_iso,
+    }
+
+    updated = (
+        supabase.table("grades")
+        .update({
+            "ai_score": body.new_score,
+            "prof_status": "Overridden",
+            "reviewed_at": now_iso,
+            "audit_feedback": [body.professor_notes],
+            "audit_notes": json.dumps(audit_notes_payload),
+        })
+        .eq("id", grade_id)
+        .execute()
+    )
+    if not updated.data:
+        raise HTTPException(status_code=500, detail="Failed to resolve appeal")
+
+    reseal_payload = {
+        "grade_id": grade_id,
+        "assessment_id": row.get("assessment_id"),
+        "old_score": old_score,
+        "new_score": body.new_score,
+        "professor_notes": body.professor_notes,
+        "resolved_by": body.resolved_by,
+        "resolved_at": now_iso,
+        "appeal_reason": row.get("appeal_reason"),
+    }
+    reseal_hash = hashlib.sha256(json.dumps(reseal_payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+    ledger_error = None
+    try:
+        supabase.table("ledger_hashes").insert({
+            "assessment_id": row.get("assessment_id"),
+            "filename": f"appeal-resolve-{grade_id}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}.json",
+            "format": "json",
+            "sha256_hash": reseal_hash,
+            "record_count": 1,
+            "generated_by": f"staff_resolve:{body.resolved_by}",
+        }).execute()
+    except Exception as exc:
+        ledger_error = str(exc)
+
+    _log_audit(
+        grade_id=grade_id,
+        action="APPEAL_RESOLVE_OVERRIDE",
+        reason=f"Staff resolved appeal: {old_score} -> {body.new_score}",
+        old_score=old_score,
+        new_score=body.new_score,
+        changed_by=body.resolved_by,
+        metadata={"professor_notes": body.professor_notes, "reseal_hash": reseal_hash},
+    )
+
+    return {
+        "status": "APPEAL_RESOLVED",
+        "message": "Appeal resolved and score resealed.",
+        "grade": updated.data[0],
+        "transaction_hash": reseal_hash,
+        "ledger_error": ledger_error,
+    }
 
 
 # ─── Audit Appeal System (The "Supreme Court") ───────────────
@@ -1697,6 +2341,71 @@ async def admin_recent_activity(limit: int = Query(20)):
         .execute()
     )
     return result.data or []
+
+
+@app.get("/api/admin/audit-records")
+async def admin_audit_records(limit: int = Query(50, ge=1, le=200)):
+    """Enterprise audit view rows with hash verification metadata."""
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    grades_res = (
+        supabase.table("grades")
+        .select("id, assessment_id, ai_score, confidence, feedback, prof_status, graded_at, students(reg_no, name), assessments(subject, title)")
+        .order("graded_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    grades = grades_res.data or []
+
+    assessment_ids = list({g.get("assessment_id") for g in grades if g.get("assessment_id")})
+    sealed_assessments: set[str] = set()
+    if assessment_ids:
+        try:
+            hash_rows = (
+                supabase.table("ledger_hashes")
+                .select("assessment_id")
+                .in_("assessment_id", assessment_ids)
+                .execute()
+            )
+            for row in (hash_rows.data or []):
+                aid = row.get("assessment_id")
+                if aid:
+                    sealed_assessments.add(aid)
+        except Exception:
+            pass
+
+    records = []
+    for row in grades:
+        student = row.get("students") or {}
+        assessment = row.get("assessments") or {}
+        assessment_id = row.get("assessment_id")
+        hash_payload = {
+            "grade_id": row.get("id"),
+            "student_id": student.get("reg_no"),
+            "assessment_id": assessment_id,
+            "score": row.get("ai_score"),
+            "graded_at": row.get("graded_at"),
+        }
+        tx_hash = hashlib.sha256(json.dumps(hash_payload, sort_keys=True).encode("utf-8")).hexdigest()
+        records.append(
+            {
+                "grade_id": row.get("id"),
+                "student_id": student.get("reg_no"),
+                "student_name": student.get("name"),
+                "status": row.get("prof_status"),
+                "score": row.get("ai_score"),
+                "confidence": row.get("confidence"),
+                "feedback_trace": row.get("feedback") or [],
+                "subject": assessment.get("subject"),
+                "title": assessment.get("title"),
+                "graded_at": row.get("graded_at"),
+                "scan_image_url": None,
+                "hash_verify": "VERIFIED" if assessment_id in sealed_assessments else "PENDING",
+                "transaction_hash": tx_hash,
+            }
+        )
+    return records
 
 
 # ─── ERP Export Module — Ledger Generation & Download ─────────
