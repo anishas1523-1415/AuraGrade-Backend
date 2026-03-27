@@ -11,6 +11,8 @@ import {
   Alert,
   Animated,
 } from "react-native";
+import * as Notifications from "expo-notifications";
+import { authFetch } from "../lib/api";
 
 /* ── Skeleton Loader ─────────────────────────────────────────
  * Gray pulsing boxes that show instantly while the GET request
@@ -69,10 +71,6 @@ function ResultSkeleton() {
   );
 }
 
-// Configure your backend URL here.
-// For local dev with Expo Go, use your machine's LAN IP (run `ipconfig` to find it).
-// In production, replace with your deployed backend URL.
-const API_BASE = process.env.EXPO_PUBLIC_API_URL || "http://192.168.0.14:8000";
 
 interface StudentDashboardProps {
   initialRegNo?: string;
@@ -100,9 +98,7 @@ export default function StudentDashboard({ initialRegNo = "", onLogout }: Studen
     setResult(null);
 
     try {
-      const response = await fetch(
-        `${API_BASE}/api/results/${regNo.trim()}`
-      );
+      const response = await authFetch(`/api/results/${encodeURIComponent(regNo.trim())}`);
       const data = await response.json();
 
       if (!response.ok) {
@@ -116,6 +112,31 @@ export default function StudentDashboard({ initialRegNo = "", onLogout }: Studen
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    const onReceived = Notifications.addNotificationReceivedListener((notification: Notifications.Notification) => {
+      const type = notification.request.content.data?.type;
+      if (type === "RESULT_PUBLISHED" || type === "APPEAL_RESOLVED") {
+        if (regNo.trim()) {
+          fetchResults();
+        }
+      }
+    });
+
+    const onResponse = Notifications.addNotificationResponseReceivedListener((response: Notifications.NotificationResponse) => {
+      const type = response.notification.request.content.data?.type;
+      if (type === "RESULT_PUBLISHED" || type === "APPEAL_RESOLVED") {
+        if (regNo.trim()) {
+          fetchResults();
+        }
+      }
+    });
+
+    return () => {
+      onReceived.remove();
+      onResponse.remove();
+    };
+  }, [regNo]);
 
   return (
     <ScrollView style={styles.container}>

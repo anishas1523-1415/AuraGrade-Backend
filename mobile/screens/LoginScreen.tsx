@@ -6,59 +6,132 @@ import {
   TouchableOpacity,
   StyleSheet,
   Alert,
+  ActivityIndicator,
 } from "react-native";
-
-export type SprintRole = "STUDENT" | "PROFESSOR";
+import { supabase } from "../lib/supabase";
+import { authFetch } from "../lib/api";
 
 interface LoginScreenProps {
-  onLogin: (payload: { role: SprintRole; loginId: string }) => void;
+  onLoginSuccess: () => Promise<void>;
 }
 
-export default function LoginScreen({ onLogin }: LoginScreenProps) {
-  const [loginId, setLoginId] = useState("");
+export default function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [dob, setDob] = useState("");
+  const [loading, setLoading] = useState(false);
 
-  const handleLogin = () => {
-    const trimmed = loginId.trim().toUpperCase();
+  const normalizeDobInput = (value: string): string | null => {
+    const trimmed = value.trim();
     if (!trimmed) {
-      Alert.alert("Login Required", "Enter your ID to continue.");
+      return null;
+    }
+
+    const normalized = trimmed.replace(/[./]/g, "-");
+    const isoMatch = normalized.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (isoMatch) {
+      return normalized;
+    }
+
+    const dmyMatch = normalized.match(/^(\d{2})-(\d{2})-(\d{4})$/);
+    if (dmyMatch) {
+      const [, day, month, year] = dmyMatch;
+      return `${year}-${month}-${day}`;
+    }
+
+    return null;
+  };
+
+  const handleLogin = async () => {
+    const normalizedEmail = email.trim().toLowerCase();
+    const normalizedDob = normalizeDobInput(dob);
+
+    if (!normalizedEmail || !password.trim()) {
+      Alert.alert("Login Required", "Enter email and password.");
       return;
     }
 
-    if (trimmed.startsWith("PROF-")) {
-      onLogin({ role: "PROFESSOR", loginId: trimmed });
+    if (dob.trim() && !normalizedDob) {
+      Alert.alert("Invalid DOB", "Use DOB as YYYY-MM-DD or DD-MM-YYYY.");
       return;
     }
 
-    if (trimmed.startsWith("AIDS-")) {
-      onLogin({ role: "STUDENT", loginId: trimmed });
-      return;
-    }
+    setLoading(true);
 
-    Alert.alert(
-      "Invalid ID Prefix",
-      "Use AIDS-... for Student or PROF-... for Professor (Sprint RBAC mode).",
-    );
+    try {
+      const { error } = await supabase.auth.signInWithPassword({
+        email: normalizedEmail,
+        password,
+      });
+
+      if (error) {
+        throw error;
+      }
+
+      const verifyRes = await authFetch("/api/auth/verify-student-dob", {
+        method: "POST",
+        body: JSON.stringify({ dob: normalizedDob || "" }),
+      });
+
+      if (!verifyRes.ok) {
+        const verifyPayload = await verifyRes.json().catch(() => ({}));
+        await supabase.auth.signOut();
+        throw new Error(verifyPayload?.detail || "DOB verification failed.");
+      }
+
+      await onLoginSuccess();
+    } catch (error: any) {
+      Alert.alert("Login Failed", error?.message || "Unable to sign in.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
     <View style={styles.container}>
       <Text style={styles.title}>AuraGrade</Text>
-      <Text style={styles.subtitle}>Unified Login (Sprint RBAC)</Text>
+      <Text style={styles.subtitle}>Secure Sign In</Text>
 
       <TextInput
         style={styles.input}
-        value={loginId}
-        onChangeText={setLoginId}
-        autoCapitalize="characters"
-        placeholder="AIDS-2026-001 or PROF-AIDS-01"
+        value={email}
+        onChangeText={setEmail}
+        autoCapitalize="none"
+        autoCorrect={false}
+        keyboardType="email-address"
+        placeholder="college-mail@example.edu"
         placeholderTextColor="#94A3B8"
       />
 
-      <TouchableOpacity style={styles.button} onPress={handleLogin} activeOpacity={0.85}>
-        <Text style={styles.buttonText}>Continue</Text>
+      <TextInput
+        style={[styles.input, { marginTop: 10 }]}
+        value={password}
+        onChangeText={setPassword}
+        secureTextEntry
+        placeholder="Password"
+        placeholderTextColor="#94A3B8"
+      />
+
+      <TextInput
+        style={[styles.input, { marginTop: 10 }]}
+        value={dob}
+        onChangeText={setDob}
+        autoCapitalize="none"
+        autoCorrect={false}
+        placeholder="DOB (YYYY-MM-DD or DD-MM-YYYY)"
+        placeholderTextColor="#94A3B8"
+      />
+
+      <TouchableOpacity
+        style={[styles.button, loading && { opacity: 0.7 }]}
+        onPress={handleLogin}
+        activeOpacity={0.85}
+        disabled={loading}
+      >
+        {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>Continue</Text>}
       </TouchableOpacity>
 
-      <Text style={styles.hint}>Student: AIDS-... · Professor: PROF-...</Text>
+      <Text style={styles.hint}>Students: add DOB. Staff: DOB optional.</Text>
     </View>
   );
 }

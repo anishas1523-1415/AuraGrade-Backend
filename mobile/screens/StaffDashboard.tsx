@@ -9,8 +9,7 @@ import {
   ActivityIndicator,
   Alert,
 } from "react-native";
-
-const API_BASE = process.env.EXPO_PUBLIC_API_URL || "http://192.168.0.14:8000";
+import { authFetch } from "../lib/api";
 
 interface PendingAppeal {
   id: string;
@@ -45,7 +44,7 @@ export default function StaffDashboard({ loginId, onLogout }: StaffDashboardProp
   const fetchPending = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/staff/appeals/pending?limit=100`);
+      const res = await authFetch(`/api/staff/appeals/pending?limit=100`);
       const data = await res.json();
       if (!res.ok) {
         throw new Error(data?.detail || "Failed to load pending appeals");
@@ -92,13 +91,12 @@ export default function StaffDashboard({ loginId, onLogout }: StaffDashboardProp
 
     setResolving(true);
     try {
-      const res = await fetch(`${API_BASE}/api/staff/appeals/${selected.id}/resolve`, {
+      const res = await authFetch(`/api/staff/appeals/${selected.id}/resolve`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           new_score: parsedScore,
           professor_notes: professorNotes.trim(),
-          resolved_by: loginId,
         }),
       });
       const data = await res.json();

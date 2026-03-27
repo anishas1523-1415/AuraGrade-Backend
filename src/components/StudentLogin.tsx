@@ -118,6 +118,7 @@ export const StudentLogin: React.FC<{
   const router = useRouter();
 
   const [regNo, setRegNo] = useState("");
+  const [dob, setDob] = useState("");
   const [isSearching, setIsSearching] = useState(false);
   const [error, setError] = useState("");
   const [scanPhase, setScanPhase] = useState(-1);
@@ -157,6 +158,12 @@ export const StudentLogin: React.FC<{
         return;
       }
 
+      const cleanedDob = dob.trim();
+      if (!cleanedDob) {
+        setError("Please enter your Date of Birth");
+        return;
+      }
+
       setError("");
       setIsSearching(true);
       setScanDone(false);
@@ -167,12 +174,13 @@ export const StudentLogin: React.FC<{
       abortRef.current = controller;
       try {
         const res = await authFetch(
-          `${API_URL}/api/students/${encodeURIComponent(cleaned)}/grades`,
+          `${API_URL}/api/students/${encodeURIComponent(cleaned)}/grades?dob=${encodeURIComponent(cleanedDob)}`,
           { signal: controller.signal },
         );
 
         if (!res.ok) {
           if (res.status === 404) throw new Error("STUDENT_NOT_FOUND");
+          if (res.status === 401) throw new Error("DOB_MISMATCH");
           throw new Error("SERVER_ERROR");
         }
 
@@ -203,6 +211,8 @@ export const StudentLogin: React.FC<{
           setError(
             `Register number "${cleaned}" not found in the institutional ledger.`,
           );
+        } else if (msg === "DOB_MISMATCH") {
+          setError("Date of Birth does not match this register number.");
         } else {
           setError("Connection to institutional server failed. Try again.");
         }
@@ -282,6 +292,28 @@ export const StudentLogin: React.FC<{
                     }`}
                   />
                 </div>
+              </div>
+            </div>
+
+            <div>
+              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-2.5 block flex items-center gap-1.5">
+                <Lock className="h-2.5 w-2.5" />
+                Date of Birth
+              </label>
+              <div className="relative" suppressHydrationWarning>
+                <input
+                  type="text"
+                  value={dob}
+                  onChange={(e) => {
+                    setDob(e.target.value);
+                    if (error) setError("");
+                  }}
+                  placeholder="YYYY-MM-DD or DD-MM-YYYY"
+                  className="w-full bg-black/50 border border-white/[0.08] rounded-2xl py-4 px-6 text-base font-mono font-bold text-white placeholder:text-white/[0.08] outline-none focus:border-cyan-500/40 focus:shadow-[0_0_20px_rgba(6,182,212,0.08)] transition-all"
+                  disabled={isSearching}
+                  suppressHydrationWarning
+                  autoComplete="off"
+                />
               </div>
             </div>
 
