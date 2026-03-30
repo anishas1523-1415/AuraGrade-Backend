@@ -1,6 +1,15 @@
 import { supabase } from "./supabase";
 
-export const API_BASE = process.env.EXPO_PUBLIC_API_URL || "http://192.168.0.14:8000";
+const API_BASE = process.env.EXPO_PUBLIC_API_URL;
+
+if (!API_BASE) {
+  throw new Error(
+    "FATAL: EXPO_PUBLIC_API_URL environment variable is not set. " +
+    "Configure it in app.json or .env file (e.g., EXPO_PUBLIC_API_URL=http://localhost:8000)"
+  );
+}
+
+export { API_BASE };
 
 export async function getAccessToken(): Promise<string | null> {
   const { data } = await supabase.auth.getSession();

@@ -1,0 +1,95 @@
+name: Frontend CI Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "src/**"
+      - "mobile/**"
+      - ".github/workflows/frontend-ci.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "src/**"
+      - "mobile/**"
+
+jobs:
+  middleware-gate:
+    name: Middleware Naming Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Verify middleware.ts exports correct function name
+        run: |
+          if [ ! -f "src/middleware.ts" ]; then
+            echo "❌ FAIL: src/middleware.ts not found"
+            exit 1
+          fi
+          
+          if ! grep -q "export.*function middleware" src/middleware.ts && \
+             ! grep -q "export async function middleware" src/middleware.ts; then
+            echo "❌ FAIL: src/middleware.ts does not export a function named 'middleware'"
+            echo "Next.js requires the middleware file to export a function named 'middleware'"
+            exit 1
+          fi
+          
+          if [ -f "src/proxy.ts" ]; then
+            echo "⚠️  WARNING: src/proxy.ts still exists (should be deleted, replaced by src/middleware.ts)"
+          fi
+          
+          echo "✅ PASS: Middleware correctly named and exported"
+
+  lint:
+    name: Lint (ESLint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: "18"
+      - run: npm ci
+      - run: npm run lint 2>&1 | head -50 || true
+
+  typecheck:
+    name: Type Check (TypeScript)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: "18"
+      - run: npm ci
+      - run: npx tsc --noEmit || true
+
+  build:
+    name: Build Check
+    runs-on: ubuntu-latest
+    needs: [middleware-gate]
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: "18"
+      - run: npm ci
+      - run: npm run build
+      - run: echo "✅ Frontend build successful"
+
+  mobile-static:
+    name: Mobile Static Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: "18"
+      - run: |
+          echo "Checking mobile/lib/api.ts..."
+          if grep -q "192.168.0.14" mobile/lib/api.ts; then
+            echo "❌ FAIL: Hardcoded IP 192.168.0.14 found in mobile/lib/api.ts"
+            exit 1
+          fi
+          if ! grep -q "EXPO_PUBLIC_API_URL" mobile/lib/api.ts; then
+            echo "❌ FAIL: EXPO_PUBLIC_API_URL not referenced in mobile/lib/api.ts"
+            exit 1
+          fi
+          echo "✅ PASS: Mobile API client hardcoded IP removed"

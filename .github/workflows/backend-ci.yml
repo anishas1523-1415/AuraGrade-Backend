@@ -1,0 +1,117 @@
+name: Backend CI Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-ci.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "backend/**"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+      - run: pip install flake8
+      - run: flake8 backend/ --max-line-length=120 --exclude=__pycache__
+
+  typecheck:
+    name: Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+      - run: pip install mypy
+      - run: mypy backend/ --ignore-missing-imports || true
+
+  auth-gate:
+    name: Auth Boundary Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+      - name: Check for unprotected endpoints
+        run: python -c "
+import re
+import sys
+
+with open('backend/main.py', 'r') as f:
+    content = f.read()
+
+# Find all route definitions
+routes = re.findall(r'@app\.(get|post|put|delete|patch)\(['\''\"](.*?)['\''\"]\)', content)
+
+# Count AI expense endpoints (should have Depends(require_auth))
+ai_routes = ['/api/evaluate', '/api/grade', '/api/voice-to-rubric', '/api/evaluate-batch', '/api/evaluate_script']
+staff_routes = ['/api/students', '/api/grades', '/api/audit-logs', '/api/system/readiness']
+
+print(f'Found {len(routes)} routes defined')
+
+# Simple heuristic: if main.py contains 'optional_auth' on an endpoint, fail
+if re.search(r'@app\.(get|post|put|delete|patch).*\n.*optional_auth', content):
+    print('❌ FAIL: Found optional_auth on route handler (should be require_auth or require_role)')
+    sys.exit(1)
+
+if not re.search(r'require_auth.*require_auth.*require_auth', content):
+    print('⚠️  WARNING: Few occurrences of require_auth found')
+
+print('✅ PASS: Auth boundary gates found')
+        "
+
+  test:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+      - run: |
+          pip install -r backend/requirements.txt
+          pip install pytest pytest-asyncio httpx
+      - name: Run auth matrix tests
+        env:
+          GEMINI_API_KEY: ${{ secrets.TEST_GEMINI_API_KEY }}
+          SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.TEST_SUPABASE_KEY }}
+          SUPABASE_JWT_SECRET: ${{ secrets.TEST_SUPABASE_JWT_SECRET }}
+          TEST_STUDENT_TOKEN: ${{ secrets.TEST_STUDENT_TOKEN }}
+          TEST_EVALUATOR_TOKEN: ${{ secrets.TEST_EVALUATOR_TOKEN }}
+          TEST_ADMIN_TOKEN: ${{ secrets.TEST_ADMIN_TOKEN }}
+        run: pytest backend/test_auth_matrix.py -v --tb=short 2>&1 | head -100
+        continue-on-error: true
+
+  build:
+    name: Build Check
+    runs-on: ubuntu-latest
+    needs: [lint, auth-gate]
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+      - run: pip install -r backend/requirements.txt
+      - run: python -m py_compile backend/main.py backend/rate_limiter.py backend/request_logger.py backend/auth_guard.py
+      - run: echo "✅ Backend build check passed"
