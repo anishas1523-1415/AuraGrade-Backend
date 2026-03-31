@@ -28,6 +28,14 @@ dist/
 *.pyc
 *.pyo
 *.pyd
+*.tsbuildinfo
+*.zip
+
+# Local packaging artifacts
+.zipbuild/
+
+# Local secret file
+backend/keys
 
 # Ignore secrets
 start-backend.bat
