@@ -18,7 +18,7 @@ load_dotenv(BASE_DIR / ".env.local")
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Form, Depends, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse
 from google import genai
 from google.genai import types
 from supabase import create_client, Client
@@ -102,6 +102,16 @@ def _validate_env():
 _validate_env()
 
 app = FastAPI()
+
+
+@app.get("/api/docs", include_in_schema=False)
+def api_docs_redirect():
+    return RedirectResponse(url="/docs", status_code=307)
+
+
+@app.get("/api/openapi.json", include_in_schema=False)
+def api_openapi_redirect():
+    return RedirectResponse(url="/openapi.json", status_code=307)
 
 # In-memory sliding-window limiter for expensive AI endpoints.
 _rate_limit_buckets: dict[str, deque[float]] = {}
