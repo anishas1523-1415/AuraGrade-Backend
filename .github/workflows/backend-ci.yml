@@ -32,7 +32,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install mypy
-      - run: mypy backend/ --ignore-missing-imports || true
+      - run: mypy backend/ --ignore-missing-imports
 
   auth-gate:
     name: Auth Boundary Gate
@@ -101,7 +101,6 @@ print('✅ PASS: Auth boundary gates found')
           TEST_EVALUATOR_TOKEN: ${{ secrets.TEST_EVALUATOR_TOKEN }}
           TEST_ADMIN_TOKEN: ${{ secrets.TEST_ADMIN_TOKEN }}
         run: pytest backend/test_auth_matrix.py -v --tb=short 2>&1 | head -100
-        continue-on-error: true
 
   build:
     name: Build Check

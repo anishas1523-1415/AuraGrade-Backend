@@ -1,39 +1,36 @@
-# ─── Dependencies ─────────────────────────────────
+# Node
 node_modules/
-
-# ─── Next.js Build ────────────────────────────────
 .next/
-out/
-build/
 
-# ─── Environment / Secrets ────────────────────────
+# Backend has its OWN repo (AuraGrade-Backend)
+backend/
+
+# Python
+.venv/
+
+# Environment
 .env
 .env.*
 .env.local
-.env.production.local
-.env.development.local
 
-# ─── IDE ──────────────────────────────────────────
+# VSCode
 .vscode/
-.idea/
-*.swp
 
-# ─── OS ───────────────────────────────────────────
+# OS
 .DS_Store
 Thumbs.db
 
-# ─── TypeScript Cache ────────────────────────────
-*.tsbuildinfo
+# Build
+build/
+dist/
 
-# ─── Debug / Logs ─────────────────────────────────
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
+# Logs
 *.log
 
-# ─── Vercel ───────────────────────────────────────
-.vercel
-
-# ─── Misc ─────────────────────────────────────────
+# Misc
 *.pyc
+*.pyo
+*.pyd
+
+# Ignore secrets
 start-backend.bat

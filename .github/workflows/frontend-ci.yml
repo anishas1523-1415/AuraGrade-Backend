@@ -14,30 +14,26 @@ on:
       - "mobile/**"
 
 jobs:
-  middleware-gate:
-    name: Middleware Naming Check
+  proxy-gate:
+    name: Proxy Naming Check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - name: Verify middleware.ts exports correct function name
+      - name: Verify proxy.ts exports correct function name
         run: |
-          if [ ! -f "src/middleware.ts" ]; then
-            echo "❌ FAIL: src/middleware.ts not found"
+          if [ ! -f "src/proxy.ts" ]; then
+            echo "❌ FAIL: src/proxy.ts not found"
             exit 1
           fi
-          
-          if ! grep -q "export.*function middleware" src/middleware.ts && \
-             ! grep -q "export async function middleware" src/middleware.ts; then
-            echo "❌ FAIL: src/middleware.ts does not export a function named 'middleware'"
-            echo "Next.js requires the middleware file to export a function named 'middleware'"
+
+          if ! grep -q "export.*function proxy" src/proxy.ts && \
+             ! grep -q "export async function proxy" src/proxy.ts; then
+            echo "❌ FAIL: src/proxy.ts does not export a function named 'proxy'"
+            echo "Next.js 16 requires the proxy file to export a function named 'proxy'"
             exit 1
           fi
-          
-          if [ -f "src/proxy.ts" ]; then
-            echo "⚠️  WARNING: src/proxy.ts still exists (should be deleted, replaced by src/middleware.ts)"
-          fi
-          
-          echo "✅ PASS: Middleware correctly named and exported"
+
+          echo "✅ PASS: Proxy correctly named and exported"
 
   lint:
     name: Lint (ESLint)
@@ -48,7 +44,7 @@ jobs:
         with:
           node-version: "18"
       - run: npm ci
-      - run: npm run lint 2>&1 | head -50 || true
+      - run: npm run lint
 
   typecheck:
     name: Type Check (TypeScript)
@@ -59,12 +55,12 @@ jobs:
         with:
           node-version: "18"
       - run: npm ci
-      - run: npx tsc --noEmit || true
+      - run: npx tsc --noEmit
 
   build:
     name: Build Check
     runs-on: ubuntu-latest
-    needs: [middleware-gate]
+    needs: [proxy-gate]
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-node@v3

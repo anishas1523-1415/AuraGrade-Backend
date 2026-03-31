@@ -1,0 +1,137 @@
+name: AuraGrade Frontend CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Gate 1: TypeScript typecheck ──────────────────────────────────────────
+  typecheck:
+    name: TypeScript typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript typecheck
+        run: npx tsc --noEmit
+        # strict mode is ON in tsconfig.json — this is a hard gate
+
+      - name: Verify middleware export name
+        run: |
+          # Critical: middleware.ts must export `middleware`, not `proxy` or anything else
+          if [ ! -f src/middleware.ts ]; then
+            echo "🔴 src/middleware.ts is MISSING — Next.js session refresh won't work"
+            exit 1
+          fi
+          if ! grep -q "export async function middleware" src/middleware.ts; then
+            echo "🔴 src/middleware.ts does not export 'middleware' — Next.js will ignore it"
+            exit 1
+          fi
+          if [ -f src/proxy.ts ]; then
+            echo "⚠️  src/proxy.ts still exists — it is unused and should be deleted"
+          fi
+          echo "✅ middleware.ts correctly exports 'middleware'"
+
+  # ── Gate 2: Lint ──────────────────────────────────────────────────────────
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Next.js lint
+        run: npm run lint
+
+      - name: Check for hardcoded API URLs
+        run: |
+          # Fail if private IPs are used as hardcoded fallbacks in code (not comments)
+          # Allow them in .env.example and documentation
+          if grep -rE '(192\.168\.|10\.0\.|localhost):\d{4}' \
+              --include="*.ts" --include="*.tsx" \
+              --exclude-dir={node_modules,.next,mobile} \
+              src/ 2>/dev/null | grep -v "//.*192\." | grep -v "\*.*192\."; then
+            echo "⚠️  Possible hardcoded local URL found in source — review above"
+            # Warning only — local URLs in comments/tests are acceptable
+          fi
+          echo "✅ No blocking hardcoded URL issues"
+
+      - name: Verify no secrets in source
+        run: |
+          if grep -rE "(AIza[A-Za-z0-9\-_]{35}|sk-[a-zA-Z0-9]{32,})" \
+              --include="*.ts" --include="*.tsx" \
+              --exclude-dir={node_modules,.next} .; then
+            echo "🔴 Hardcoded API key detected — FAILING CI"
+            exit 1
+          fi
+          echo "✅ No hardcoded secrets"
+
+  # ── Gate 3: Build ─────────────────────────────────────────────────────────
+  build:
+    name: Next.js build
+    runs-on: ubuntu-latest
+    needs: [typecheck, lint]
+    env:
+      NEXT_PUBLIC_SUPABASE_URL:      ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+      NEXT_PUBLIC_API_URL:           ${{ secrets.NEXT_PUBLIC_API_URL }}
+      GEMINI_API_KEY:                ${{ secrets.GEMINI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Next.js app
+        run: npm run build
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextjs-build
+          path: .next/
+          retention-days: 3
+
+  # ── Release gate ──────────────────────────────────────────────────────────
+  release-gate:
+    name: Release gate
+    runs-on: ubuntu-latest
+    needs: [typecheck, lint, build]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: All gates passed
+        run: |
+          echo "╔══════════════════════════════════════════════════════╗"
+          echo "║  ✅ AuraGrade Frontend — All CI Gates Passed         ║"
+          echo "║  ✅ TypeScript · Lint · Build                        ║"
+          echo "║  Ready for production deployment                     ║"
+          echo "╚══════════════════════════════════════════════════════╝"

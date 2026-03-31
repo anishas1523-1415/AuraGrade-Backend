@@ -147,26 +147,20 @@ validate_ci() {
     echo "Add these in: GitHub > Settings > Secrets and variables > Actions"
 }
 
-validate_middleware() {
-    log_header "Validating Middleware Fix"
-    
-    if [ ! -f "$REPO_ROOT/src/middleware.ts" ]; then
-        log_error "src/middleware.ts not found"
+validate_proxy() {
+    log_header "Validating Proxy Fix"
+
+    if [ ! -f "$REPO_ROOT/src/proxy.ts" ]; then
+        log_error "src/proxy.ts not found"
         return 1
     fi
-    log_success "src/middleware.ts found"
-    
-    if [ -f "$REPO_ROOT/src/proxy.ts" ]; then
-        log_error "src/proxy.ts still exists (should be deleted)"
+    log_success "src/proxy.ts found"
+
+    if ! grep -q "export.*function proxy" "$REPO_ROOT/src/proxy.ts"; then
+        log_error "proxy.ts does not export 'proxy' function"
         return 1
     fi
-    log_success "src/proxy.ts deleted (correct)"
-    
-    if ! grep -q "export.*function middleware" "$REPO_ROOT/src/middleware.ts"; then
-        log_error "middleware.ts does not export 'middleware' function"
-        return 1
-    fi
-    log_success "middleware.ts exports correct function name"
+    log_success "proxy.ts exports correct function name"
 }
 
 validate_all() {
@@ -180,8 +174,8 @@ validate_all() {
     validate_ci || return 1
     
     echo ""
-    echo "Checking: Middleware fix"
-    validate_middleware || return 1
+    echo "Checking: Proxy fix"
+    validate_proxy || return 1
     
     echo ""
     echo "Checking: Environment variables"

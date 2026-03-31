@@ -1,0 +1,76 @@
+-- ============================================================
+-- Migration: Insert 63 Students from Excel DB
+-- AuraGrade student DB1.xlsx
+-- ============================================================
+-- This migration adds 63 students from the Excel file
+-- while preserving existing students (AD010, AD011, AD038, AD008)
+
+INSERT INTO students (reg_no, name, email, course)
+VALUES
+  ('23TUAD001', 'AATHITHIYA S U', '23tuad001@example.edu', 'Data Science'),
+  ('23TUAD002', 'AKIL SARAVANAN K', '23tuad002@example.edu', 'Data Science'),
+  ('23TUAD003', 'AKILESH D', '23tuad003@example.edu', 'Data Science'),
+  ('23TUAD004', 'ALANSHO.J', '23tuad004@example.edu', 'Data Science'),
+  ('23TUAD005', 'ALLEN WILKINS T', '23tuad005@example.edu', 'Data Science'),
+  ('23TUAD006', 'ANAND V B', '23tuad006@example.edu', 'Data Science'),
+  ('23TUAD007', 'ANANIAS REMO A', '23tuad007@example.edu', 'Data Science'),
+  ('23TUAD008', 'ANBARASU S', '23tuad008@example.edu', 'Data Science'),
+  ('23TUAD009', 'ANBUSELVAN S', '23tuad009@example.edu', 'Data Science'),
+  ('23TUAD010', 'ANISH A S', '23tuad010@example.edu', 'Data Science'),
+  ('23TUAD011', 'ANUSHALAKSHMI S', '23tuad011@example.edu', 'Data Science'),
+  ('23TUAD012', 'ASHWIN S', '23tuad012@example.edu', 'Data Science'),
+  ('23TUAD013', 'ASHWITA K', '23tuad013@example.edu', 'Data Science'),
+  ('23TUAD014', 'BALA SANKAR S', '23tuad014@example.edu', 'Data Science'),
+  ('23TUAD015', 'BALAJI S', '23tuad015@example.edu', 'Data Science'),
+  ('23TUAD016', 'BANUMATHI M', '23tuad016@example.edu', 'Data Science'),
+  ('23TUAD017', 'BIRUNDHA M S', '23tuad017@example.edu', 'Data Science'),
+  ('23TUAD018', 'BOOMIKA T', '23tuad018@example.edu', 'Data Science'),
+  ('23TUAD019', 'DARANEESH B', '23tuad019@example.edu', 'Data Science'),
+  ('23TUAD020', 'DEEPAKKUMARAN V S', '23tuad020@example.edu', 'Data Science'),
+  ('23TUAD021', 'DHAMODHAR P', '23tuad021@example.edu', 'Data Science'),
+  ('23TUAD022', 'DHANASEKAR B', '23tuad022@example.edu', 'Data Science'),
+  ('23TUAD023', 'DHANU SREE. P', '23tuad023@example.edu', 'Data Science'),
+  ('23TUAD024', 'DHANUSH KUMAR K', '23tuad024@example.edu', 'Data Science'),
+  ('23TUAD025', 'DHARINEESH T K', '23tuad025@example.edu', 'Data Science'),
+  ('23TUAD026', 'DHARSHINI M', '23tuad026@example.edu', 'Data Science'),
+  ('23TUAD027', 'DHARSHNI D', '23tuad027@example.edu', 'Data Science'),
+  ('23TUAD028', 'DHIVAGAR V', '23tuad028@example.edu', 'Data Science'),
+  ('23TUAD029', 'DINESHKUMAR N', '23tuad029@example.edu', 'Data Science'),
+  ('23TUAD030', 'DIVYA DHARSHINI . N', '23tuad030@example.edu', 'Data Science'),
+  ('23TUAD031', 'ELANGOVAN M', '23tuad031@example.edu', 'Data Science'),
+  ('23TUAD032', 'GOKUL K', '23tuad032@example.edu', 'Data Science'),
+  ('23TUAD033', 'GOKUL K 12.10.2005', '23tuad033@example.edu', 'Data Science'),
+  ('23TUAD034', 'GOKULKRISHNAN M', '23tuad034@example.edu', 'Data Science'),
+  ('23TUAD035', 'HAREES AHAMED K', '23tuad035@example.edu', 'Data Science'),
+  ('23TUAD036', 'HARISH RAGHAVENDRAA G', '23tuad036@example.edu', 'Data Science'),
+  ('23TUAD037', 'HARISH S', '23tuad037@example.edu', 'Data Science'),
+  ('23TUAD038', 'HAVISHKUMAR S', '23tuad038@example.edu', 'Data Science'),
+  ('23TUAD039', 'HEERA MOHAMED A M', '23tuad039@example.edu', 'Data Science'),
+  ('23TUAD040', 'JOTHI KRITHICK ROSHAN S', '23tuad040@example.edu', 'Data Science'),
+  ('23TUAD041', 'KALKI S', '23tuad041@example.edu', 'Data Science'),
+  ('23TUAD042', 'KANISHKAR P', '23tuad042@example.edu', 'Data Science'),
+  ('23TUAD043', 'KARTHIK RAJA A', '23tuad043@example.edu', 'Data Science'),
+  ('23TUAD044', 'KARTHIKEYAN V S', '23tuad044@example.edu', 'Data Science'),
+  ('23TUAD045', 'KAVIBHARATHI G', '23tuad045@example.edu', 'Data Science'),
+  ('23TUAD046', 'KAVIN KUMAR.M', '23tuad046@example.edu', 'Data Science'),
+  ('23TUAD047', 'KAVIYA S', '23tuad047@example.edu', 'Data Science'),
+  ('23TUAD048', 'KIRUTHI SWETHA. S', '23tuad048@example.edu', 'Data Science'),
+  ('23TUAD049', 'KOWSALYA B', '23tuad049@example.edu', 'Data Science'),
+  ('23TUAD050', 'KRITHICK BALA B', '23tuad050@example.edu', 'Data Science'),
+  ('23TUAD051', 'LAVANYA N', '23tuad051@example.edu', 'Data Science'),
+  ('23TUAD052', 'LOGAKEERTHI SOMU', '23tuad052@example.edu', 'Data Science'),
+  ('23TUAD053', 'LOKESH T', '23tuad053@example.edu', 'Data Science'),
+  ('23TUAD054', 'MAHA SHREE P', '23tuad054@example.edu', 'Data Science'),
+  ('23TUAD055', 'MANOJ BALAJI T', '23tuad055@example.edu', 'Data Science'),
+  ('23TUAD056', 'MITHILESH ES', '23tuad056@example.edu', 'Data Science'),
+  ('23TUAD057', 'MOHAMED SABEER M', '23tuad057@example.edu', 'Data Science'),
+  ('23TUAD058', 'MOHANA A', '23tuad058@example.edu', 'Data Science'),
+  ('23TUAD059', 'MOHANAPRIYAN M', '23tuad059@example.edu', 'Data Science'),
+  ('23TUAD060', 'MANOJ BBOOPATHI G R', '23tuad060@example.edu', 'Data Science'),
+  ('23TUAD061', 'DIVITH L', '23tuad061@example.edu', 'Data Science'),
+  ('23TUAD062', 'KAMAL S', '23tuad062@example.edu', 'Data Science'),
+  ('23TUAD063', 'MOHANRAMU M', '23tuad063@example.edu', 'Data Science')
+ON CONFLICT (reg_no) DO NOTHING;
+
+-- Verify insertion
+SELECT COUNT(*) as total_students FROM students;

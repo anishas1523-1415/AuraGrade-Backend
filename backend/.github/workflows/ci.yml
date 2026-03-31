@@ -1,0 +1,239 @@
+name: AuraGrade Backend CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Gate 1: Lint & type safety ─────────────────────────────────────────────
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install lint tools
+        run: pip install ruff pyright --break-system-packages
+
+      - name: Ruff lint
+        run: ruff check . --select E,F,W,I --ignore E501
+        # E501 = line length — excluded until codebase is reformatted
+
+      - name: Pyright type check (non-blocking for now)
+        run: pyright main.py auth_guard.py rate_limiter.py request_logger.py || true
+        # `|| true` makes this advisory until strict typing is added in Phase D
+        # Remove `|| true` once all type annotations are complete
+
+  # ── Gate 2: Security scan ─────────────────────────────────────────────────
+  security:
+    name: Security scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install bandit
+        run: pip install bandit --break-system-packages
+
+      - name: Bandit security scan
+        run: |
+          bandit -r . \
+            --exclude .venv,venv \
+            --skip B101,B601 \
+            --severity-level medium \
+            --confidence-level medium
+        # B101 = assert usage (test code)
+        # B601 = shell injection (false positives in subprocess calls)
+
+      - name: Verify no hardcoded secrets
+        run: |
+          # Fail if any actual key patterns are found in source
+          if grep -rE "(AIza[A-Za-z0-9\-_]{35}|sk-[a-zA-Z0-9]{32,})" \
+              --include="*.py" --include="*.ts" \
+              --exclude-dir={.git,.venv,node_modules} .; then
+            echo "🔴 Hardcoded API key pattern detected — FAILING CI"
+            exit 1
+          fi
+          echo "✅ No hardcoded secrets found"
+
+      - name: Verify all endpoints have auth guards
+        run: |
+          python3 - << 'PYCHECK'
+          import re, sys
+          with open("main.py") as f:
+              src = f.read()
+          lines = src.split('\n')
+          unprotected = []
+          for i, line in enumerate(lines):
+              m = re.search(r'@app\.(get|post|put|delete|patch)\("([^"]+)"', line)
+              if m:
+                  path = m.group(2)
+                  window = '\n'.join(lines[i:i+20])
+                  has_auth = any(kw in window for kw in ['require_auth', 'require_role', 'optional_auth'])
+                  # Only root / is allowed to be public
+                  if not has_auth and path != '/':
+                      unprotected.append(f"{m.group(1).upper()} {path}")
+          if unprotected:
+              print("🔴 UNPROTECTED ENDPOINTS DETECTED:")
+              for ep in unprotected:
+                  print(f"  {ep}")
+              sys.exit(1)
+          print(f"✅ All endpoints have auth guards")
+          PYCHECK
+
+  # ── Gate 3: Tests ─────────────────────────────────────────────────────────
+  test:
+    name: Auth matrix tests
+    runs-on: ubuntu-latest
+    needs: [lint, security]
+    env:
+      # Real tokens injected from GitHub Secrets for integration tests
+      BACKEND_URL:           ${{ secrets.TEST_BACKEND_URL }}
+      TEST_STUDENT_TOKEN:    ${{ secrets.TEST_STUDENT_TOKEN }}
+      TEST_STAFF_TOKEN:      ${{ secrets.TEST_STAFF_TOKEN }}
+      TEST_ADMIN_TOKEN:      ${{ secrets.TEST_ADMIN_TOKEN }}
+      TEST_STUDENT_REG_NO:   ${{ secrets.TEST_STUDENT_REG_NO }}
+      TEST_GRADE_ID:         ${{ secrets.TEST_GRADE_ID }}
+      TEST_ASSESSMENT_ID:    ${{ secrets.TEST_ASSESSMENT_ID }}
+      # Minimal env so the app can start in test mode
+      GEMINI_API_KEY:        ${{ secrets.GEMINI_API_KEY }}
+      SUPABASE_URL:          ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY:          ${{ secrets.SUPABASE_KEY }}
+      SUPABASE_JWT_SECRET:   ${{ secrets.SUPABASE_JWT_SECRET }}
+      CORS_ORIGIN:           "http://localhost:3000"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest pytest-asyncio httpx --break-system-packages
+
+      - name: Start backend server
+        run: |
+          uvicorn main:app --host 0.0.0.0 --port 8000 &
+          # Wait for server to be ready (max 30s)
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8000/ -H "Authorization: Bearer fake" > /dev/null 2>&1 \
+              || curl -sf http://localhost:8000/ > /dev/null 2>&1 \
+              && echo "Server ready" && break
+            sleep 1
+          done
+        env:
+          BACKEND_URL: "http://localhost:8000"
+
+      - name: Run auth matrix tests
+        run: |
+          pytest test_auth_matrix.py -v \
+            --tb=short \
+            --junit-xml=test-results.xml \
+            -x
+        # -x = stop on first failure (faster feedback)
+        env:
+          BACKEND_URL: "http://localhost:8000"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results.xml
+
+  # ── Gate 4: Build check ───────────────────────────────────────────────────
+  build-check:
+    name: Build check
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install all dependencies
+        run: pip install -r requirements.txt --break-system-packages
+
+      - name: Verify app imports cleanly
+        run: |
+          python3 - << 'PYCHECK'
+          import ast, sys
+          with open("main.py") as f:
+              src = f.read()
+          try:
+              ast.parse(src)
+              print("✅ main.py parses successfully")
+          except SyntaxError as e:
+              print(f"🔴 Syntax error: {e}")
+              sys.exit(1)
+
+          # Verify critical module imports are present
+          required_imports = [
+              "from auth_guard import",
+              "from rate_limiter import",
+              "from request_logger import",
+              "from slowapi.errors import RateLimitExceeded",
+          ]
+          for imp in required_imports:
+              if imp not in src:
+                  print(f"🔴 Missing import: {imp}")
+                  sys.exit(1)
+          print("✅ All critical imports present")
+          PYCHECK
+
+      - name: Verify requirements are pinned or bounded
+        run: |
+          python3 - << 'PYCHECK'
+          import sys
+          with open("requirements.txt") as f:
+              reqs = f.read().strip().split('\n')
+          unpinned = [r for r in reqs if r and not r.startswith('#') 
+                      and '>=' not in r and '==' not in r and '~=' not in r
+                      and '[' not in r]  # allow extras like uvicorn[standard]
+          if unpinned:
+              print(f"⚠️  Unpinned dependencies (consider adding version bounds):")
+              for r in unpinned:
+                  print(f"  {r}")
+              # Warning only — don't fail CI for this yet
+          else:
+              print("✅ All dependencies have version constraints")
+          PYCHECK
+
+  # ── Release gate: only on main ────────────────────────────────────────────
+  release-gate:
+    name: Release gate
+    runs-on: ubuntu-latest
+    needs: [lint, security, test, build-check]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: All gates passed
+        run: |
+          echo "╔══════════════════════════════════════════════════════╗"
+          echo "║  ✅ AuraGrade Backend — All CI Gates Passed          ║"
+          echo "║  ✅ Lint · Security · Auth Tests · Build             ║"
+          echo "║  Ready for production deployment                     ║"
+          echo "╚══════════════════════════════════════════════════════╝"
