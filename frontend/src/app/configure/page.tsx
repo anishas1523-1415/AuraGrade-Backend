@@ -33,6 +33,7 @@ import {
 import Link from "next/link";
 import { UserBadge } from "@/components/UserBadge";
 import { useAuth } from "@/lib/auth-context";
+import { useAuthFetch } from "@/lib/use-auth-fetch";
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -82,6 +83,8 @@ function AuthButton() {
 
 export default function RubricUploadPage() {
   const router = useRouter();
+  const authFetch = useAuthFetch();
+  const { user, loading } = useAuth();
 
   // Assessment state
   const [assessments, setAssessments] = useState<Assessment[]>([]);
@@ -214,11 +217,22 @@ export default function RubricUploadPage() {
   /* ---------- Load assessments ---------- */
   useEffect(() => {
     const fetchAssessments = async () => {
+      if (loading) return;
+      if (!user) {
+        setAssessments([]);
+        setSyncResult({ success: false, message: "Please sign in to load assessments." });
+        return;
+      }
       try {
-        const res = await fetch(`${API_URL}/api/assessments`);
+        const res = await authFetch(`${API_URL}/api/assessments`);
         if (res.ok) {
           const data = await res.json();
           setAssessments(data);
+          setSyncResult(null);
+        } else if (res.status === 401) {
+          setSyncResult({ success: false, message: "Session expired. Please sign in again." });
+        } else {
+          setSyncResult({ success: false, message: "Failed to load assessments. Please sign in again." });
         }
       } catch (err) {
         console.error("Failed to load assessments:", err);
@@ -226,7 +240,7 @@ export default function RubricUploadPage() {
       }
     };
     fetchAssessments();
-  }, []);
+  }, [authFetch, loading, user]);
 
   /* ---------- When assessment selection changes, populate existing data ---------- */
   useEffect(() => {
@@ -316,7 +330,7 @@ export default function RubricUploadPage() {
 
       const url = `${API_URL}/api/rubric/upload-pdf?assessment_id=${encodeURIComponent(selectedAssessment)}&auto_sync=true${subjectHint ? `&subject_hint=${encodeURIComponent(subjectHint)}` : ""}`;
 
-      const res = await fetch(url, { method: "POST", body: formData });
+      const res = await authFetch(url, { method: "POST", body: formData });
 
       if (res.ok) {
         const data = await res.json();
@@ -345,7 +359,7 @@ export default function RubricUploadPage() {
         }
 
         // Reload assessments to reflect new rubric
-        const listRes = await fetch(`${API_URL}/api/assessments`);
+        const listRes = await authFetch(`${API_URL}/api/assessments`);
         if (listRes.ok) setAssessments(await listRes.json());
       } else {
         const err = await res.json().catch(() => ({}));
@@ -369,7 +383,7 @@ export default function RubricUploadPage() {
     if (!newSubject.trim() || !newTitle.trim()) return;
     setCreatingAssessment(true);
     try {
-      const res = await fetch(`${API_URL}/api/assessments`, {
+      const res = await authFetch(`${API_URL}/api/assessments`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ subject: newSubject.trim(), title: newTitle.trim() }),
@@ -378,7 +392,7 @@ export default function RubricUploadPage() {
         const data = await res.json();
         const newId = data.id || data[0]?.id;
         // Reload assessments
-        const listRes = await fetch(`${API_URL}/api/assessments`);
+        const listRes = await authFetch(`${API_URL}/api/assessments`);
         if (listRes.ok) setAssessments(await listRes.json());
         if (newId) setSelectedAssessment(newId);
         setNewSubject("");
@@ -433,7 +447,7 @@ export default function RubricUploadPage() {
           };
         });
 
-        const rubricRes = await fetch(
+        const rubricRes = await authFetch(
           `${API_URL}/api/sync-rubric?assessment_id=${encodeURIComponent(selectedAssessment)}`,
           {
             method: "POST",
@@ -457,7 +471,7 @@ export default function RubricUploadPage() {
       if (modelAnswerFile && modelAnswerFile.type.startsWith("image/")) {
         const formData = new FormData();
         formData.append("file", modelAnswerFile);
-        const imgRes = await fetch(
+        const imgRes = await authFetch(
           `${API_URL}/api/model-answer?assessment_id=${encodeURIComponent(selectedAssessment)}`,
           { method: "POST", body: formData }
         );
@@ -470,7 +484,7 @@ export default function RubricUploadPage() {
       else if (modelAnswerText.trim() && validRubric.length === 0) {
         const formData = new FormData();
         formData.append("text", modelAnswerText.trim());
-        const textRes = await fetch(
+        const textRes = await authFetch(
           `${API_URL}/api/model-answer?assessment_id=${encodeURIComponent(selectedAssessment)}`,
           { method: "POST", body: formData }
         );
@@ -481,7 +495,7 @@ export default function RubricUploadPage() {
       }
 
       // Reload assessment to show updated state
-      const listRes = await fetch(`${API_URL}/api/assessments`);
+      const listRes = await authFetch(`${API_URL}/api/assessments`);
       if (listRes.ok) setAssessments(await listRes.json());
 
       setSyncResult({

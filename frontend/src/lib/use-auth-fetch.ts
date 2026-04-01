@@ -10,16 +10,19 @@ import { createClient } from "@/lib/supabase/client";
  *   const authFetch = useAuthFetch();
  *   const res = await authFetch("/api/admin/stats");
  */
-import { useCallback } from "react";
+import { useCallback, useRef } from "react";
 
 export function useAuthFetch() {
-  const supabase = createClient();
+  const supabaseRef = useRef<ReturnType<typeof createClient> | null>(null);
+  if (!supabaseRef.current) {
+    supabaseRef.current = createClient();
+  }
 
   return useCallback(
     async (url: string, options: RequestInit = {}): Promise<Response> => {
       const {
         data: { session },
-      } = await supabase.auth.getSession();
+      } = await supabaseRef.current.auth.getSession();
 
       const headers = new Headers(options.headers);
       if (session?.access_token) {
@@ -28,6 +31,6 @@ export function useAuthFetch() {
 
       return fetch(url, { ...options, headers });
     },
-    [supabase]
+    []
   );
 }

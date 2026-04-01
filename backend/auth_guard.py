@@ -17,6 +17,28 @@ if SUPABASE_URL and SUPABASE_KEY:
     _supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
+def _decode_via_supabase(token: str) -> Optional[Dict]:
+    """Validate and resolve JWT through Supabase Auth when available."""
+    if not _supabase:
+        return None
+
+    try:
+        auth_user = _supabase.auth.get_user(token)
+        user_obj = getattr(auth_user, "user", None)
+        if not user_obj:
+            return None
+
+        payload: Dict = {
+            "sub": getattr(user_obj, "id", None),
+            "email": getattr(user_obj, "email", None),
+            "user_metadata": getattr(user_obj, "user_metadata", {}) or {},
+            "app_metadata": getattr(user_obj, "app_metadata", {}) or {},
+        }
+        return payload
+    except Exception:
+        return None
+
+
 ROLE_ALIASES = {
     "student": "STUDENT",
     "staff": "EVALUATOR",
@@ -58,12 +80,14 @@ def verify_user(
 
     token = credentials.credentials
     try:
-        payload = jwt.decode(
-            token,
-            JWT_SECRET,
-            algorithms=["HS256"],
-            audience="authenticated",
-        )
+        payload = _decode_via_supabase(token)
+        if payload is None:
+            payload = jwt.decode(
+                token,
+                JWT_SECRET,
+                algorithms=["HS256"],
+                audience="authenticated",
+            )
 
         user_id = payload.get("sub")
         user_metadata = payload.get("user_metadata", {}) or {}
