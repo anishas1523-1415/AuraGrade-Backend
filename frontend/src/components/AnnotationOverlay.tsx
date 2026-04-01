@@ -132,11 +132,10 @@ export const AnnotationOverlay: React.FC<AnnotationOverlayProps> = ({
 
   const handlePointerDown = useCallback(
     (e: React.PointerEvent) => {
-      if (zoom <= 1) return;
       setIsPanning(true);
       setPanStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
     },
-    [zoom, pan],
+    [pan],
   );
 
   const handlePointerMove = useCallback(
@@ -224,7 +223,7 @@ export const AnnotationOverlay: React.FC<AnnotationOverlayProps> = ({
       {/* ─── Canvas area ─── */}
       <div
         ref={containerRef}
-        className="relative flex-1 overflow-hidden cursor-grab active:cursor-grabbing"
+        className="relative flex-1 overflow-auto cursor-grab active:cursor-grabbing"
         onWheel={handleWheel}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}

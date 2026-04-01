@@ -5,6 +5,7 @@ import imageCompression from "browser-image-compression";
 import { useDropzone } from "react-dropzone";
 import { downloadCSV, downloadPDF, type ReportRow } from "@/lib/report-export";
 import toast from "react-hot-toast";
+import { useAuthFetch } from "@/lib/use-auth-fetch";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -180,6 +181,7 @@ function parseSSEFrames(raw: string): Array<{ event: string; data: string }> {
 /* ------------------------------------------------------------------ */
 
 export default function EvaluationDashboard() {
+  const authFetch = useAuthFetch();
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [isEvaluating, setIsEvaluating] = useState(false);
@@ -197,6 +199,7 @@ export default function EvaluationDashboard() {
   const [batchTotal, setBatchTotal] = useState<number>(0);
   const [batchResult, setBatchResult] = useState<Record<string, unknown> | null>(null);
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const isPdfPreview = !!file && (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf"));
 
   // ── react-dropzone for batch mode ───────────────────────────
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
@@ -225,8 +228,9 @@ export default function EvaluationDashboard() {
   useEffect(() => {
     return () => {
       if (pollingRef.current) clearInterval(pollingRef.current);
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
     };
-  }, []);
+  }, [previewUrl]);
 
   // Auto-scroll the terminal log
   useEffect(() => {
@@ -292,13 +296,14 @@ export default function EvaluationDashboard() {
     ].join("|");
 
     try {
-      const response = await fetch(`${API_URL}/api/evaluate?idempotency_key=${encodeURIComponent(idempotencyKey)}`, {
+      const response = await authFetch(`${API_URL}/api/evaluate?idempotency_key=${encodeURIComponent(idempotencyKey)}`, {
         method: "POST",
         body: formData,
       });
 
       if (!response.ok) {
-        throw new Error(`Server error: ${response.status} ${response.statusText}`);
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || `Server error: ${response.status} ${response.statusText}`);
       }
       if (!response.body) throw new Error("No response body from server.");
 
@@ -370,7 +375,7 @@ export default function EvaluationDashboard() {
     } finally {
       setIsEvaluating(false);
     }
-  }, [file]);
+  }, [file, authFetch]);
 
   // ── Batch evaluation with job polling ───────────────────────
   const startBatchEvaluation = useCallback(async () => {
@@ -390,7 +395,7 @@ export default function EvaluationDashboard() {
     }
 
     try {
-      const response = await fetch(`${API_URL}/api/evaluate-batch`, {
+      const response = await authFetch(`${API_URL}/api/evaluate-batch`, {
         method: "POST",
         body: formData,
       });
@@ -426,7 +431,7 @@ export default function EvaluationDashboard() {
       // ── Poll for progress ────────────────────────────────
       pollingRef.current = setInterval(async () => {
         try {
-          const statusRes = await fetch(`${API_URL}/api/batch-status/${jobId}`);
+          const statusRes = await authFetch(`${API_URL}/api/batch-status/${jobId}`);
           if (!statusRes.ok) return;
           const status = await statusRes.json();
 
@@ -486,7 +491,9 @@ export default function EvaluationDashboard() {
       ]);
       setIsEvaluating(false);
     }
-  }, [batchFiles]);  return (
+  }, [batchFiles, authFetch]);
+
+  return (
     <div className="min-h-screen bg-gray-50 p-4 sm:p-8 font-sans">
       <div className="max-w-5xl mx-auto bg-white shadow-xl rounded-2xl overflow-hidden border border-gray-100">
         {/* ── Header ───────────────────────────────────────────── */}
@@ -671,11 +678,19 @@ export default function EvaluationDashboard() {
           {/* Image preview (single mode) */}
           {!batchMode && previewUrl && !evaluationData && (
             <div className="mt-4">
-              <img
-                src={previewUrl}
-                alt="Selected exam script"
-                className="max-h-48 rounded-lg border border-slate-200 shadow-sm"
-              />
+              {isPdfPreview ? (
+                <iframe
+                  src={previewUrl}
+                  title="Selected exam PDF"
+                  className="w-full h-64 rounded-lg border border-slate-200 shadow-sm bg-white"
+                />
+              ) : (
+                <img
+                  src={previewUrl}
+                  alt="Selected exam script"
+                  className="max-h-48 rounded-lg border border-slate-200 shadow-sm"
+                />
+              )}
             </div>
           )}
         </div>

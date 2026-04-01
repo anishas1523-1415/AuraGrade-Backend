@@ -48,7 +48,7 @@ export function UserBadge() {
   };
 
   return (
-    <div ref={ref} className="relative">
+    <div ref={ref} className="relative z-[200]">
       <button
         onClick={() => setOpen(!open)}
         className="flex items-center gap-2.5 px-3 py-1.5 rounded-xl border border-white/10 bg-white/5 backdrop-blur-xl hover:bg-white/10 transition-colors"
@@ -73,7 +73,7 @@ export function UserBadge() {
 
       {/* Dropdown */}
       {open && (
-        <div className="absolute right-0 mt-2 w-56 rounded-xl border border-white/10 bg-slate-900/95 backdrop-blur-2xl shadow-2xl overflow-hidden z-50">
+        <div className="absolute right-0 mt-2 w-56 rounded-xl border border-white/10 bg-slate-900/95 backdrop-blur-2xl shadow-2xl overflow-hidden z-[250]">
           <div className="px-4 py-3 border-b border-white/5">
             <p className="text-xs text-white/70 font-medium">{profile?.full_name || "User"}</p>
             <p className="text-[10px] text-white/30 mt-0.5">{user.email}</p>

@@ -95,6 +95,7 @@ const GradingDashboard = () => {
   const [maxSimilarityScore, setMaxSimilarityScore] = useState<number>(0);
   const [isFlagged, setIsFlagged] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [selectedFileIsPdf, setSelectedFileIsPdf] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -102,9 +103,25 @@ const GradingDashboard = () => {
 
   /* ---------- annotation overlay state ---------- */
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
+  const [justificationNote, setJustificationNote] = useState("");
+  const [perQuestionScores, setPerQuestionScores] = useState<Record<string, number>>({});
+  const [penaltiesApplied, setPenaltiesApplied] = useState<string[]>([]);
 
   /* ---------- pass tracking for Progress HUD ---------- */
   const [currentPass, setCurrentPass] = useState(0); // 0: Idle, 1: Grader, 2: Auditor, 3: Done
+
+  const buildContentHash = async (f: File): Promise<string> => {
+    try {
+      const bytes = await f.arrayBuffer();
+      const digest = await crypto.subtle.digest("SHA-256", bytes);
+      return Array.from(new Uint8Array(digest))
+        .slice(0, 16)
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+    } catch {
+      return [f.name, String(f.size), String(f.lastModified)].join("|");
+    }
+  };
 
   /* ---------- DB / Supabase state ---------- */
   const [gradeId, setGradeId] = useState<string | null>(null);
@@ -128,8 +145,8 @@ const GradingDashboard = () => {
     const loadData = async () => {
       try {
         const [studentsRes, assessmentsRes] = await Promise.all([
-          fetch(`${API_URL}/api/students`),
-          fetch(`${API_URL}/api/assessments`),
+          authFetch(`${API_URL}/api/students`),
+          authFetch(`${API_URL}/api/assessments`),
         ]);
         if (studentsRes.ok) {
           const s = await studentsRes.json();
@@ -146,7 +163,7 @@ const GradingDashboard = () => {
       }
     };
     loadData();
-  }, []);
+  }, [authFetch]);
 
   /* ---------------------------------------------------------------- */
   /*  Handlers                                                         */
@@ -164,6 +181,7 @@ const GradingDashboard = () => {
     const isPdf =
       file.type === "application/pdf" ||
       file.name.toLowerCase().endsWith(".pdf");
+    setSelectedFileIsPdf(isPdf);
 
     if (isPdf) {
       // PDF can't render as <img> — request backend conversion
@@ -171,7 +189,7 @@ const GradingDashboard = () => {
       try {
         const pdfForm = new FormData();
         pdfForm.append("file", file);
-        const pdfRes = await fetch(`${API_URL}/api/pdf-preview`, {
+        const pdfRes = await authFetch(`${API_URL}/api/pdf-preview`, {
           method: "POST",
           body: pdfForm,
         });
@@ -179,12 +197,23 @@ const GradingDashboard = () => {
           const pdfData = await pdfRes.json();
           if (pdfData.preview) {
             setPreviewUrl(pdfData.preview); // data:image/jpeg;base64,...
+            setSelectedFileIsPdf(false);
+          } else {
+            // Fallback: show browser PDF viewer if image preview is unavailable.
+            setPreviewUrl(URL.createObjectURL(file));
+            setSelectedFileIsPdf(true);
           }
+        } else {
+          setPreviewUrl(URL.createObjectURL(file));
+          setSelectedFileIsPdf(true);
         }
       } catch {
         console.warn("⚠️ PDF preview conversion failed");
+        setPreviewUrl(URL.createObjectURL(file));
+        setSelectedFileIsPdf(true);
       }
     } else {
+      setSelectedFileIsPdf(false);
       setPreviewUrl(URL.createObjectURL(file));
     }
 
@@ -203,12 +232,15 @@ const GradingDashboard = () => {
     setProfStatus("Pending");
     setShowAppealInput(false);
     setAnnotations([]);
+    setJustificationNote("");
+    setPerQuestionScores({});
+    setPenaltiesApplied([]);
 
     // ── Auto-detect student from answer-sheet header ──────────
     try {
       const headerForm = new FormData();
       headerForm.append("file", file);
-      const detection = await fetch(`${API_URL}/api/parse-header`, {
+      const detection = await authFetch(`${API_URL}/api/parse-header`, {
         method: "POST",
         body: headerForm,
       });
@@ -239,7 +271,11 @@ const GradingDashboard = () => {
     }
 
     setIsGrading(true);
-    setFeedback([]);
+    setFeedback([
+      "🚀 Initializing grading session…",
+      "🔐 Verifying authenticated stream…",
+      "📡 Waiting for live agent events…",
+    ]);
     setScore(null);
     setConfidence(null);
     setConfidenceScore(null);
@@ -252,6 +288,9 @@ const GradingDashboard = () => {
     setSavedToDb(false);
     setProfStatus("Pending");
     setAnnotations([]);
+    setJustificationNote("");
+    setPerQuestionScores({});
+    setPenaltiesApplied([]);
     setCurrentPass(0);
 
     try {
@@ -284,10 +323,9 @@ const GradingDashboard = () => {
       const params = new URLSearchParams();
       if (studentRegNo) params.set("student_reg_no", studentRegNo);
       if (selectedAssessment) params.set("assessment_id", selectedAssessment);
+      const contentHash = await buildContentHash(selectedFile);
       const idempotencyKey = [
-        selectedFile.name,
-        String(selectedFile.size),
-        String(selectedFile.lastModified),
+        contentHash,
         studentRegNo || "NO_STUDENT",
         selectedAssessment || "NO_ASSESSMENT",
       ].join("|");
@@ -295,7 +333,10 @@ const GradingDashboard = () => {
       if (params.toString()) url += `?${params.toString()}`;
 
       // POST with fetch, then read the response body as an SSE stream
-      const response = await fetch(url, { method: "POST", body: formData });
+      const timeoutController = new AbortController();
+      const timeoutId = window.setTimeout(() => timeoutController.abort(), 180000);
+      const response = await authFetch(url, { method: "POST", body: formData, signal: timeoutController.signal });
+      window.clearTimeout(timeoutId);
 
       if (!response.ok) {
         const errData = await response
@@ -303,6 +344,8 @@ const GradingDashboard = () => {
           .catch(() => ({ detail: "Server error" }));
         throw new Error(errData.detail || `HTTP ${response.status}`);
       }
+
+      setFeedback((prev) => [...prev, "✅ Live stream connected."]);
 
       const reader = response.body?.getReader();
       if (!reader) throw new Error("No readable stream in response");
@@ -424,15 +467,24 @@ const GradingDashboard = () => {
         const flagged = payload.is_flagged as boolean;
         const cscore = (payload.confidence_score as number) ?? null;
         const hrr = (payload.human_review_required as boolean) ?? false;
+        const pq = (payload.per_question_scores as Record<string, number>) || {};
+        const penalties = (payload.penalties_applied as string[]) || [];
+        const why = (payload.justification_note as string) || "";
         setScore(s);
         setConfidence(c);
         setConfidenceScore(cscore);
         setHumanReviewRequired(hrr);
         setIsFlagged(flagged);
+        setPerQuestionScores(pq);
+        setPenaltiesApplied(penalties);
+        setJustificationNote(why);
         setFeedback((prev) => [
           ...prev,
           `💯 Final Score: ${s}/15`,
         ]);
+        if (why) {
+          setFeedback((prev) => [...prev, `🧾 Why this score: ${why}`]);
+        }
         if (hrr) {
           setFeedback((prev) => [
             ...prev,
@@ -627,20 +679,41 @@ const GradingDashboard = () => {
   };
 
   const handleApprove = async () => {
-    if (!gradeId) {
-      setFeedback((prev) => [...prev, "❌ Cannot approve — grade ID not available."]);
+    let targetGradeId = gradeId;
+    if (!targetGradeId && savedToDb && studentRegNo && selectedAssessment) {
+      try {
+        const lookupRes = await authFetch(`${API_URL}/api/grades`);
+        if (lookupRes.ok) {
+          const rows = (await lookupRes.json()) as Array<Record<string, unknown>>;
+          const hit = rows.find((row) => {
+            const s = (row.students as Record<string, unknown> | undefined) || {};
+            const aId = row.assessment_id as string | undefined;
+            return String(s.reg_no || "") === studentRegNo && aId === selectedAssessment;
+          });
+          if (hit?.id) {
+            targetGradeId = String(hit.id);
+            setGradeId(targetGradeId);
+          }
+        }
+      } catch {
+        // best effort fallback
+      }
+    }
+
+    if (!targetGradeId) {
+      setFeedback((prev) => [...prev, "❌ Cannot approve — grade ID not available yet."]);
       return;
     }
     try {
       // Try authenticated fetch first, fall back to plain fetch if auth fails
       let res: Response;
       try {
-        res = await authFetch(`${API_URL}/api/grades/${gradeId}/approve`, {
+        res = await authFetch(`${API_URL}/api/grades/${targetGradeId}/approve`, {
           method: "PUT",
         });
       } catch {
         // Auth fetch failed (no session?) — try plain fetch
-        res = await fetch(`${API_URL}/api/grades/${gradeId}/approve`, {
+        res = await fetch(`${API_URL}/api/grades/${targetGradeId}/approve`, {
           method: "PUT",
         });
       }
@@ -763,7 +836,7 @@ const GradingDashboard = () => {
 
       <div className="mx-auto max-w-[1440px] px-6 py-6">
         {/* ========== HEADER ========== */}
-        <header className="flex flex-wrap items-center justify-between gap-4 mb-8 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-2xl px-6 py-4">
+        <header className="relative z-30 overflow-visible flex flex-wrap items-center justify-between gap-4 mb-8 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-2xl px-6 py-4">
           {/* Brand */}
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 to-cyan-400 shadow-lg shadow-blue-500/25">
@@ -974,17 +1047,25 @@ const GradingDashboard = () => {
             )}
 
             {previewUrl ? (
-              <AnnotationOverlay
-                imageSrc={previewUrl}
-                annotations={annotations}
-                isScanning={isGrading && score === null}
-                onAnnotationClick={(a) =>
-                  setFeedback((prev) => [
-                    ...prev,
-                    `🔎 ${a.label}: ${a.description}`,
-                  ])
-                }
-              />
+              selectedFileIsPdf ? (
+                <iframe
+                  src={previewUrl}
+                  title="Uploaded script PDF"
+                  className="w-full h-full border-0"
+                />
+              ) : (
+                <AnnotationOverlay
+                  imageSrc={previewUrl}
+                  annotations={annotations}
+                  isScanning={isGrading && score === null}
+                  onAnnotationClick={(a) =>
+                    setFeedback((prev) => [
+                      ...prev,
+                      `🔎 ${a.label}: ${a.description}`,
+                    ])
+                  }
+                />
+              )
             ) : (
               <div className="flex-1 flex items-center justify-center">
                 <div
@@ -996,7 +1077,7 @@ const GradingDashboard = () => {
                     Click to upload an answer script
                   </p>
                   <p className="text-xs text-white/20 mt-1">
-                    PNG, JPG — or use the Upload button
+                    PNG, JPG, PDF — or use the Upload button
                   </p>
                 </div>
               </div>
@@ -1054,6 +1135,41 @@ const GradingDashboard = () => {
                 <div ref={feedbackEndRef} />
               </div>
             </ScrollArea>
+
+            {score !== null && (
+              <div className="border-t border-white/10 px-5 py-4 bg-black/25 space-y-3">
+                <div className="rounded-xl border border-cyan-500/20 bg-cyan-500/10 px-4 py-3">
+                  <p className="text-[10px] uppercase tracking-wider text-cyan-300/70 mb-1">Why Marks Were Given</p>
+                  <p className="text-sm text-cyan-100/90 leading-relaxed">
+                    {justificationNote || "No justification was returned by the model."}
+                  </p>
+                </div>
+
+                {Object.keys(perQuestionScores).length > 0 && (
+                  <div className="rounded-xl border border-white/10 bg-white/5 px-4 py-3">
+                    <p className="text-[10px] uppercase tracking-wider text-white/40 mb-2">Per Question Score Basis</p>
+                    <div className="flex flex-wrap gap-2">
+                      {Object.entries(perQuestionScores).map(([k, v]) => (
+                        <span key={k} className="inline-flex items-center rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-xs text-emerald-300">
+                          {k.toUpperCase()}: {v}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {penaltiesApplied.length > 0 && (
+                  <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3">
+                    <p className="text-[10px] uppercase tracking-wider text-amber-300/70 mb-1">Penalty Notes</p>
+                    <div className="space-y-1">
+                      {penaltiesApplied.map((p, i) => (
+                        <p key={i} className="text-xs text-amber-100/90">• {p}</p>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* ---------- Bottom Stats & Actions ---------- */}
             <div className="border-t border-white/10 bg-black/20 backdrop-blur-xl px-5 py-4 space-y-3">
@@ -1155,7 +1271,7 @@ const GradingDashboard = () => {
 
                 {/* Action buttons */}
                 <div className="flex gap-2">
-                  {gradeId && profStatus === "Pending" && (
+                  {(gradeId || savedToDb) && profStatus === "Pending" && (
                     <>
                       <Button
                         onClick={handleApprove}

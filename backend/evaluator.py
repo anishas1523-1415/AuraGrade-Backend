@@ -78,6 +78,7 @@ ENABLE_DIAGRAM_PASS = os.environ.get("ENABLE_DIAGRAM_PASS", "0" if FAST_EVAL_MOD
 ENABLE_AUDIT_PASS = os.environ.get("ENABLE_AUDIT_PASS", "0" if FAST_EVAL_MODE else "1").strip().lower() in {"1", "true", "yes", "on"}
 ENABLE_SENTINEL_PASS = os.environ.get("ENABLE_SENTINEL_PASS", "0" if FAST_EVAL_MODE else "1").strip().lower() in {"1", "true", "yes", "on"}
 ASYNC_GAP_SYNC = os.environ.get("ASYNC_GAP_SYNC", "1").strip().lower() in {"1", "true", "yes", "on"}
+STAGE_TIMEOUT_SECONDS = int(os.environ.get("STAGE_TIMEOUT_SECONDS", "90"))
 
 PASS1_RESPONSE_SCHEMA = {
     "type": "object",
@@ -628,7 +629,10 @@ async def agentic_grade_stream(
             try:
                 from vision_logic import detect_diagrams, validate_diagram_logic
 
-                detection = await detect_diagrams(image_bytes, mime_type)
+                detection = await asyncio.wait_for(
+                    detect_diagrams(image_bytes, mime_type),
+                    timeout=min(STAGE_TIMEOUT_SECONDS, 30),
+                )
 
                 if detection.get("has_diagram"):
                     diagrams = detection.get("diagrams", [])
@@ -650,7 +654,10 @@ async def agentic_grade_stream(
                         "phase": "diagram_convert",
                     })
 
-                    diagram_result = await validate_diagram_logic(image_bytes, mime_type)
+                    diagram_result = await asyncio.wait_for(
+                        validate_diagram_logic(image_bytes, mime_type),
+                        timeout=min(STAGE_TIMEOUT_SECONDS, 30),
+                    )
 
                     if diagram_result.get("is_valid"):
                         yield _sse_event("step", {
@@ -777,18 +784,22 @@ Deduct marks for genuine logic flaws identified above.
         pass1_response = None
         for _attempt in range(4):
             try:
-                pass1_response = await call_gemini_async(
-                    client,
-                    model="gemini-3-flash-preview",
-                    contents=[
-                        types.Part.from_bytes(data=processed_bytes, mime_type="image/jpeg"),
-                        grader_prompt,
-                    ],
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=PASS1_RESPONSE_SCHEMA,
-                        media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
+                pass1_response = await asyncio.wait_for(
+                    call_gemini_async(
+                        client,
+                        model="gemini-3-flash-preview",
+                        contents=[
+                            types.Part.from_bytes(data=processed_bytes, mime_type="image/jpeg"),
+                            grader_prompt,
+                        ],
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            response_schema=PASS1_RESPONSE_SCHEMA,
+                            media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
+                            temperature=0.0,
+                        ),
                     ),
+                    timeout=STAGE_TIMEOUT_SECONDS,
                 )
                 break  # success
             except QuotaExhaustedError as qe:
@@ -812,6 +823,17 @@ Deduct marks for genuine logic flaws identified above.
                     "text": "Retrying Grader Agent…",
                     "phase": "quota_retry",
                 })
+            except TimeoutError:
+                if _attempt >= 3:
+                    raise RuntimeError("Pass 1 timed out — please retry with a clearer image or lower load")
+                yield _sse_event("step", {
+                    "icon": "⚠️",
+                    "text": f"Pass 1 timeout after {STAGE_TIMEOUT_SECONDS}s — retrying…",
+                    "phase": "pass1_timeout_retry",
+                })
+                refreshed = _rotate_client()
+                if refreshed:
+                    client = refreshed
 
         # ── SAFETY NET: handle None / exception / malformed ───────
         pass1_result = parse_response(pass1_response)
@@ -1028,18 +1050,22 @@ Output strictly in JSON:
             pass2_response = None
             for _attempt in range(4):
                 try:
-                    pass2_response = await call_gemini_async(
-                        client,
-                        model="gemini-3-flash-preview",
-                        contents=[
-                            types.Part.from_bytes(data=processed_bytes, mime_type="image/jpeg"),
-                            audit_prompt,
-                        ],
-                        config=types.GenerateContentConfig(
-                            response_mime_type="application/json",
-                            response_schema=PASS2_RESPONSE_SCHEMA,
-                            media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
+                    pass2_response = await asyncio.wait_for(
+                        call_gemini_async(
+                            client,
+                            model="gemini-3-flash-preview",
+                            contents=[
+                                types.Part.from_bytes(data=processed_bytes, mime_type="image/jpeg"),
+                                audit_prompt,
+                            ],
+                            config=types.GenerateContentConfig(
+                                response_mime_type="application/json",
+                                response_schema=PASS2_RESPONSE_SCHEMA,
+                                media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
+                                temperature=0.0,
+                            ),
                         ),
+                        timeout=STAGE_TIMEOUT_SECONDS,
                     )
                     break
                 except QuotaExhaustedError as qe:
@@ -1063,6 +1089,17 @@ Output strictly in JSON:
                         "text": "Retrying Audit Agent…",
                         "phase": "quota_retry",
                     })
+                except TimeoutError:
+                    if _attempt >= 3:
+                        raise RuntimeError("Pass 2 timed out — using pass 1 result")
+                    yield _sse_event("step", {
+                        "icon": "⚠️",
+                        "text": f"Pass 2 timeout after {STAGE_TIMEOUT_SECONDS}s — retrying…",
+                        "phase": "pass2_timeout_retry",
+                    })
+                    refreshed = _rotate_client()
+                    if refreshed:
+                        client = refreshed
 
             pass2_result = parse_response(pass2_response)
             if not pass2_result or not isinstance(pass2_result, dict):
