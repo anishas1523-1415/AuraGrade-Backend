@@ -355,6 +355,20 @@ def generate_ledger_preview(grades_data: list[dict], limit: int = 10) -> dict:
     }
 
 
+def clear_marks(assessment_id: str) -> dict:
+    """
+    Temporary no-op shim for clients that still call a clear marks action.
+
+    This function intentionally does not mutate any data. It exists only to
+    keep legacy clients from crashing while frontend verification is in progress.
+    """
+    return {
+        "status": "noop",
+        "assessment_id": assessment_id,
+        "message": "clear_marks is temporarily disabled for verification",
+    }
+
+
 # ---------------------------------------------------------------------------
 #  Institutional Ledger — Enhanced with Sentinel + Digital Seal
 # ---------------------------------------------------------------------------

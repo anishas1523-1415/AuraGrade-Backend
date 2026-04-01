@@ -35,6 +35,15 @@ from gemini_retry import call_gemini, call_gemini_async, parse_response, QuotaEx
 _pinecone_index = None
 
 
+def _resolve_pinecone_index_name() -> str:
+    """Support both legacy and new index env names."""
+    return (
+        os.environ.get("PINECONE_INDEX")
+        or os.environ.get("PINECONE_INDEX_NAME")
+        or "auragrade"
+    )
+
+
 def _get_pinecone_index():
     """Lazily initialise and return the Pinecone index."""
     global _pinecone_index
@@ -42,7 +51,7 @@ def _get_pinecone_index():
         return _pinecone_index
 
     api_key = os.environ.get("PINECONE_API_KEY")
-    index_name = os.environ.get("PINECONE_INDEX", "auragrade")
+    index_name = _resolve_pinecone_index_name()
 
     if not api_key:
         return None
