@@ -10,6 +10,7 @@ from app.routers import (
     staff_router,
     student_router,
     institutional_router,
+    coe_portal_router,
 )
 
 def create_app() -> FastAPI:
@@ -57,6 +58,7 @@ def create_app() -> FastAPI:
     app.include_router(staff_router)
     app.include_router(student_router)
     app.include_router(institutional_router)
+    app.include_router(coe_portal_router)
 
     # ─── Register Error Handlers ──────────────────────────────
     register_error_handlers(app)

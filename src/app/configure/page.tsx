@@ -221,7 +221,6 @@ export default function RubricUploadPage() {
     const fetchAssessments = async () => {
       setAssessmentsLoading(true);
       setAssessmentError(null);
-      if (loading) return;
       try {
         const res = await authFetch(`${API_URL}/api/assessments`);
         if (res.ok) {
@@ -247,7 +246,7 @@ export default function RubricUploadPage() {
       }
     };
     fetchAssessments();
-  }, [authFetch, loading, user]);
+  }, [authFetch, user]);
 
   /* ---------- When assessment selection changes, populate existing data ---------- */
   useEffect(() => {
@@ -438,6 +437,7 @@ export default function RubricUploadPage() {
 
     try {
       const results: string[] = [];
+      let hasFailure = false;
 
       // 1. Sync rubric JSON to Supabase
       if (validRubric.length > 0) {
@@ -470,6 +470,7 @@ export default function RubricUploadPage() {
           results.push(data.message);
         } else {
           const err = await rubricRes.json().catch(() => ({}));
+          hasFailure = true;
           results.push(`Rubric sync failed: ${err.detail || "Unknown error"}`);
         }
       }
@@ -485,6 +486,10 @@ export default function RubricUploadPage() {
         if (imgRes.ok) {
           const data = await imgRes.json();
           results.push(data.message);
+        } else {
+          const err = await imgRes.json().catch(() => ({}));
+          hasFailure = true;
+          results.push(`Model answer image sync failed: ${err.detail || "Unknown error"}`);
         }
       }
       // 3. If text only (no rubric sync already handled it), sync text model answer
@@ -498,15 +503,24 @@ export default function RubricUploadPage() {
         if (textRes.ok) {
           const data = await textRes.json();
           results.push(data.message);
+        } else {
+          const err = await textRes.json().catch(() => ({}));
+          hasFailure = true;
+          results.push(`Model answer text sync failed: ${err.detail || "Unknown error"}`);
         }
       }
 
       // Reload assessment to show updated state
       const listRes = await authFetch(`${API_URL}/api/assessments`);
-      if (listRes.ok) setAssessments(await listRes.json());
+      if (listRes.ok) {
+        setAssessments(await listRes.json());
+      } else {
+        hasFailure = true;
+        results.push("Refresh failed: could not reload assessments");
+      }
 
       setSyncResult({
-        success: true,
+        success: !hasFailure,
         message: results.join(" · ") || "Synced successfully",
       });
     } catch (err) {

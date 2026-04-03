@@ -345,7 +345,7 @@ export default function StudentDashboard() {
             </motion.div>
           )}
 
-          {searched && error && (
+          {searched && error && grades.length === 0 && (
             <motion.div
               key="error"
               initial={{ opacity: 0, y: 16 }}

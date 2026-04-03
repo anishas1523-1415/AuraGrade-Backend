@@ -161,6 +161,12 @@ export const LandingPage = () => {
               Staff Login
             </Link>
             <Link
+              href="/coe/login"
+              className="hidden sm:inline-flex text-[10px] font-black uppercase tracking-wider text-cyan-300 hover:text-cyan-200 transition-colors px-3 py-2"
+            >
+              COE Portal
+            </Link>
+            <Link
               href="/configure"
               className="px-5 py-2.5 bg-white text-black text-[10px] font-black uppercase italic rounded-full hover:bg-cyan-400 hover:shadow-lg hover:shadow-cyan-500/20 transition-all"
             >
@@ -233,6 +239,13 @@ export const LandingPage = () => {
             >
               <GraduationCap className="w-4 h-4" />
               Student Portal
+            </Link>
+            <Link
+              href="/coe/login"
+              className="px-8 py-4 bg-emerald-500/15 border border-emerald-400/20 text-emerald-200 font-black uppercase italic rounded-2xl hover:bg-emerald-500/20 hover:border-emerald-300/30 transition-all text-sm flex items-center gap-2"
+            >
+              <ShieldAlert className="w-4 h-4" />
+              COE Portal
             </Link>
           </div>
         </motion.div>

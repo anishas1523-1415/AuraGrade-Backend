@@ -87,7 +87,16 @@ export default function StudentResultPage() {
 
     const fetchGrade = async () => {
       try {
-        const res = await authFetch(`${API_URL}/api/grades/${gradeId}`);
+        // Try to get student credentials from local storage for student portal access
+        const regNo = typeof window !== "undefined" ? localStorage.getItem("student_reg_no") : null;
+        const dob = typeof window !== "undefined" ? localStorage.getItem("student_dob") : null;
+        
+        let url = `${API_URL}/api/grades/${gradeId}`;
+        if (regNo && dob) {
+          url += `?reg_no=${encodeURIComponent(regNo)}&dob=${encodeURIComponent(dob)}`;
+        }
+        
+        const res = await authFetch(url);
         if (!res.ok) throw new Error("Grade not found");
         const data = await res.json();
         setGrade(data);

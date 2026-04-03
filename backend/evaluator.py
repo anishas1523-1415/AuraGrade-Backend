@@ -319,6 +319,92 @@ def map_to_frontend_coords(box_2d: list) -> dict:
     }
 
 
+def _safe_num(v, default: float = 0.0) -> float:
+    try:
+        return float(v)
+    except Exception:
+        return default
+
+
+def _normalize_percent_coords(x: float, y: float, w: float, h: float) -> dict:
+    # Accept either [0..1] normalized values or [0..100] percentages.
+    if x <= 1 and y <= 1 and w <= 1 and h <= 1:
+        x, y, w, h = x * 100.0, y * 100.0, w * 100.0, h * 100.0
+
+    return {
+        "x": round(max(0.0, min(95.0, x)), 2),
+        "y": round(max(0.0, min(95.0, y)), 2),
+        "width": round(max(2.0, min(100.0, w)), 2),
+        "height": round(max(2.0, min(100.0, h)), 2),
+    }
+
+
+def coords_from_annotation(ann: dict, idx: int = 0) -> dict:
+    """
+    Build robust frontend coords from multiple possible annotation schemas.
+    Priority:
+    1) Gemini box_2d [ymin,xmin,ymax,xmax] in 0..1000
+    2) explicit x/y/width/height (percent or 0..1 normalized)
+    3) pixel boxes using image/page width+height metadata
+    4) region hints (top/middle/bottom/left/right)
+    5) staggered fallback to avoid overlap
+    """
+    box_2d = ann.get("box_2d")
+    if isinstance(box_2d, list) and len(box_2d) >= 4:
+        return map_to_frontend_coords(box_2d)
+
+    # Explicit percentage-ish fields
+    x = ann.get("x", ann.get("left", ann.get("x_pct", ann.get("x_percent"))))
+    y = ann.get("y", ann.get("top", ann.get("y_pct", ann.get("y_percent"))))
+    w = ann.get("width", ann.get("w", ann.get("width_pct", ann.get("w_pct"))))
+    h = ann.get("height", ann.get("h", ann.get("height_pct", ann.get("h_pct"))))
+    if x is not None and y is not None and w is not None and h is not None:
+        return _normalize_percent_coords(_safe_num(x), _safe_num(y), _safe_num(w), _safe_num(h))
+
+    # Pixel-space boxes (x1,y1,x2,y2) with optional page/image dimensions.
+    x1 = ann.get("x1", ann.get("xmin"))
+    y1 = ann.get("y1", ann.get("ymin"))
+    x2 = ann.get("x2", ann.get("xmax"))
+    y2 = ann.get("y2", ann.get("ymax"))
+    if x1 is not None and y1 is not None and x2 is not None and y2 is not None:
+        img_w = _safe_num(ann.get("image_width", ann.get("page_width", ann.get("img_w", 0))), 0.0)
+        img_h = _safe_num(ann.get("image_height", ann.get("page_height", ann.get("img_h", 0))), 0.0)
+        if img_w > 0 and img_h > 0:
+            px = (_safe_num(x1) / img_w) * 100.0
+            py = (_safe_num(y1) / img_h) * 100.0
+            pw = ((_safe_num(x2) - _safe_num(x1)) / img_w) * 100.0
+            ph = ((_safe_num(y2) - _safe_num(y1)) / img_h) * 100.0
+            return _normalize_percent_coords(px, py, pw, ph)
+
+    # Region hints from vision model
+    region = str(ann.get("region", "")).lower()
+    if region:
+        x_map = 8.0
+        y_map = 10.0
+        w_map = 84.0
+        h_map = 12.0
+
+        if "left" in region:
+            x_map = 6.0
+            w_map = 42.0
+        elif "right" in region:
+            x_map = 52.0
+            w_map = 42.0
+
+        if "top" in region:
+            y_map = 12.0
+        elif "middle" in region:
+            y_map = 42.0
+        elif "bottom" in region:
+            y_map = 72.0
+
+        return _normalize_percent_coords(x_map, y_map, w_map, h_map)
+
+    # Non-overlapping fallback bands
+    y_band = 8.0 + (idx % 10) * 8.5
+    return _normalize_percent_coords(6.0, y_band, 88.0, 7.5)
+
+
 # ---------------------------------------------------------------------------
 #  SSE event helper
 # ---------------------------------------------------------------------------
@@ -905,7 +991,7 @@ Deduct marks for genuine logic flaws identified above.
                 # In fast mode, just convert and emit all at once
                 for i, ann in enumerate(raw_annotations):
                     if isinstance(ann, dict):
-                        coords = map_to_frontend_coords(ann.get("box_2d", []))
+                        coords = coords_from_annotation(ann, i)
                         indexed_annotations.append({
                             "id": f"ann_{i}",
                             "type": ann.get("type", "key_term"),
@@ -921,7 +1007,7 @@ Deduct marks for genuine logic flaws identified above.
                 # In slow mode, stream incrementally
                 for i, ann in enumerate(raw_annotations):
                     if isinstance(ann, dict):
-                        coords = map_to_frontend_coords(ann.get("box_2d", []))
+                        coords = coords_from_annotation(ann, i)
                         annotation_obj = {
                             "id": f"ann_{i}",
                             "type": ann.get("type", "key_term"),

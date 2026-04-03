@@ -28,6 +28,7 @@ interface AnnotationOverlayProps {
   imageSrc: string;
   annotations: Annotation[];
   isScanning: boolean;
+  showInlineDescription?: boolean;
   /** Optional callback when an annotation is clicked */
   onAnnotationClick?: (annotation: Annotation) => void;
 }
@@ -101,6 +102,7 @@ export const AnnotationOverlay: React.FC<AnnotationOverlayProps> = ({
   imageSrc,
   annotations,
   isScanning,
+  showInlineDescription = true,
   onAnnotationClick,
 }) => {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
@@ -322,7 +324,7 @@ export const AnnotationOverlay: React.FC<AnnotationOverlayProps> = ({
                       </div>
 
                       {/* Inline reason strip on the box itself */}
-                      {note.description && (
+                      {showInlineDescription && note.description && (
                         <div
                           className={`absolute left-0 right-0 bottom-0 px-1.5 py-0.5 text-[9px] leading-tight border-t truncate ${note.points !== undefined && note.points < 0
                             ? "bg-rose-500/25 text-rose-100 border-rose-400/40"

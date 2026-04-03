@@ -77,11 +77,39 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           .select("*")
           .eq("id", currentUser.id)
           .single();
-        if (data) {
-          setProfile(data as Profile);
-        } else {
-          setProfile(buildFallbackProfile(currentUser));
+
+        const baseProfile = data ? (data as Profile) : buildFallbackProfile(currentUser);
+
+        try {
+          const { data: staffData } = await supabase
+            .from("coe_staff_profiles")
+            .select("role, is_active")
+            .eq("email", currentUser.email || "")
+            .maybeSingle();
+
+          if (
+            staffData &&
+            String(staffData.role || "").toUpperCase() === "EVALUATOR" &&
+            staffData.is_active !== false
+          ) {
+            setProfile({
+              ...baseProfile,
+              role: "EVALUATOR",
+              email: currentUser.email || baseProfile.email,
+              full_name:
+                baseProfile.full_name ||
+                currentUser.user_metadata?.full_name ||
+                currentUser.user_metadata?.name ||
+                baseProfile.email.split("@")[0] ||
+                "Evaluator",
+            });
+            return;
+          }
+        } catch {
+          // Fall back to the main profiles table if COE staff lookup is unavailable.
         }
+
+        setProfile(baseProfile);
       } catch {
         setProfile(buildFallbackProfile(currentUser));
       }

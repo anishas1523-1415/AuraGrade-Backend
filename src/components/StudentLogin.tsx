@@ -199,6 +199,10 @@ export const StudentLogin: React.FC<{
 
         setScanDone(true);
 
+        // Keep authenticated student credentials in local storage for later use
+        localStorage.setItem("student_reg_no", cleaned);
+        localStorage.setItem("student_dob", cleanedDob);
+
         // Brief pause to show ✅ ALL GREEN state
         await new Promise((r) => setTimeout(r, 800));
 
@@ -222,7 +226,7 @@ export const StudentLogin: React.FC<{
         setScanPhase(-1);
       }
     },
-    [regNo, onAuthenticated],
+    [regNo, dob, authFetch, onAuthenticated],
   );
 
   /* ---------- Render ---------- */

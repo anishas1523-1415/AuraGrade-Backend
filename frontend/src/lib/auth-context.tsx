@@ -53,14 +53,63 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   /* ---------- Fetch profile from profiles table ---------- */
   const fetchProfile = useCallback(
-    async (userId: string) => {
+    async (currentUser: User) => {
       try {
         const { data } = await supabase
           .from("profiles")
           .select("*")
-          .eq("id", userId)
+          .eq("id", currentUser.id)
           .single();
-        setProfile(data as Profile | null);
+
+        const baseProfile =
+          (data as Profile | null) ?? {
+            id: currentUser.id,
+            full_name:
+              currentUser.user_metadata?.full_name ||
+              currentUser.user_metadata?.name ||
+              currentUser.email?.split("@")[0] ||
+              "Evaluator",
+            email: currentUser.email || "",
+            department: "",
+            role: "EVALUATOR",
+          };
+
+        const email = currentUser.email || baseProfile.email;
+
+        try {
+          const { data: staffData } = await supabase
+            .from("coe_staff_profiles")
+            .select("role, is_active")
+            .eq("email", email)
+            .maybeSingle();
+
+          if (
+            staffData &&
+            String(staffData.role || "").toUpperCase() === "EVALUATOR" &&
+            staffData.is_active !== false
+          ) {
+            setProfile(
+              baseProfile
+                ? { ...baseProfile, role: "EVALUATOR" }
+                : {
+                    id: currentUser.id,
+                    full_name:
+                      currentUser.user_metadata?.full_name ||
+                      currentUser.user_metadata?.name ||
+                      email.split("@")[0] ||
+                      "Evaluator",
+                    email,
+                    department: "",
+                    role: "EVALUATOR",
+                  },
+            );
+            return;
+          }
+        } catch {
+          // Ignore COE lookup failures and keep the main profile result.
+        }
+
+        setProfile(baseProfile);
       } catch {
         setProfile(null);
       }
@@ -80,7 +129,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setUser(currentSession?.user ?? null);
 
         if (currentSession?.user) {
-          await fetchProfile(currentSession.user.id);
+          await fetchProfile(currentSession.user);
         }
       } catch (err) {
         console.error("Failed to initialize auth session:", err);
@@ -103,7 +152,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setUser(newSession?.user ?? null);
 
         if (newSession?.user) {
-          await fetchProfile(newSession.user.id);
+          await fetchProfile(newSession.user);
         } else {
           setProfile(null);
         }
@@ -126,7 +175,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [supabase]);
 
   const refreshProfile = useCallback(async () => {
-    if (user) await fetchProfile(user.id);
+    if (user) await fetchProfile(user);
   }, [user, fetchProfile]);
 
   /* ---------- Role helpers ---------- */

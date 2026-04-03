@@ -9,6 +9,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { StudentMobileView } from "@/components/StudentMobileView";
+import { AnnotationOverlay, type Annotation } from "@/components/AnnotationOverlay";
 import {
   MessageSquareQuote,
   RotateCcw,
@@ -72,6 +73,10 @@ export default function StudentResultPage() {
     is_unread: boolean;
   }>>([]);
   const [unreadCount, setUnreadCount] = useState(0);
+  const [scriptLoading, setScriptLoading] = useState(false);
+  const [scriptError, setScriptError] = useState<string | null>(null);
+  const [scriptImageSrc, setScriptImageSrc] = useState<string | null>(null);
+  const [scriptAnnotations, setScriptAnnotations] = useState<Annotation[]>([]);
 
   useEffect(() => {
     const mq = window.matchMedia("(max-width: 1023px)");
@@ -87,7 +92,16 @@ export default function StudentResultPage() {
 
     const fetchGrade = async () => {
       try {
-        const res = await authFetch(`${API_URL}/api/grades/${gradeId}`);
+        // Try to get student credentials from local storage for student portal access
+        const regNo = typeof window !== "undefined" ? localStorage.getItem("student_reg_no") : null;
+        const dob = typeof window !== "undefined" ? localStorage.getItem("student_dob") : null;
+        
+        let url = `${API_URL}/api/grades/${gradeId}`;
+        if (regNo && dob) {
+          url += `?reg_no=${encodeURIComponent(regNo)}&dob=${encodeURIComponent(dob)}`;
+        }
+        
+        const res = await authFetch(url);
         if (!res.ok) throw new Error("Grade not found");
         const data = await res.json();
         setGrade(data);
@@ -100,6 +114,80 @@ export default function StudentResultPage() {
     fetchGrade();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gradeId]);
+
+  useEffect(() => {
+    if (!gradeId) return;
+
+    const fallbackFromFeedback = (feedback: string[]): Annotation[] => {
+      const candidates = (feedback || []).slice(0, 8);
+      return candidates.map((point, i) => {
+        const txt = point.toLowerCase();
+        const isNegative =
+          txt.includes("missing") ||
+          txt.includes("incorrect") ||
+          txt.includes("deduct") ||
+          txt.includes("penalty") ||
+          txt.includes("error") ||
+          point.includes("⚠");
+
+        return {
+          id: `feedback_${i}`,
+          type: isNegative ? "error" : "key_term",
+          label: `Q${i + 1}`,
+          description: point,
+          points: isNegative ? -1 : 1,
+          x: 8,
+          y: 8 + i * 10,
+          width: 84,
+          height: 8,
+        } as Annotation;
+      });
+    };
+
+    const fetchScript = async () => {
+      setScriptLoading(true);
+      setScriptError(null);
+      try {
+        // Get student credentials from local storage for authentication
+        const regNo = typeof window !== "undefined" ? localStorage.getItem("student_reg_no") : null;
+        const dob = typeof window !== "undefined" ? localStorage.getItem("student_dob") : null;
+        
+        let scriptUrl = `${API_URL}/api/grades/${gradeId}/script`;
+        if (regNo && dob) {
+          scriptUrl += `?reg_no=${encodeURIComponent(regNo)}&dob=${encodeURIComponent(dob)}`;
+        }
+        
+        const res = await authFetch(scriptUrl);
+        if (!res.ok) {
+          setScriptError("Answer script not available for this grade yet.");
+          return;
+        }
+        const data = await res.json();
+        const script = data?.script || {};
+        const src = script?.image_src || null;
+        const ann = Array.isArray(script?.annotations) ? (script.annotations as Annotation[]) : [];
+
+        setScriptImageSrc(src);
+        if (ann.length > 0) {
+          setScriptAnnotations(ann);
+        } else if (grade?.feedback?.length) {
+          setScriptAnnotations(fallbackFromFeedback(grade.feedback));
+        } else {
+          setScriptAnnotations([]);
+        }
+
+        if (!src) {
+          setScriptError("Answer script image is not available in storage for this attempt.");
+        }
+      } catch {
+        setScriptError("Unable to load answer script.");
+      } finally {
+        setScriptLoading(false);
+      }
+    };
+
+    fetchScript();
+  }, [gradeId, authFetch, grade?.feedback]);
 
   useEffect(() => {
     if (!grade?.students?.reg_no) return;
@@ -493,6 +581,38 @@ export default function StudentResultPage() {
                   This submission was flagged by AI for manual review. A professor will verify the grade.
                 </motion.div>
               )}
+
+              <div className="mt-8 border-t border-white/10 pt-6">
+                <div className="mb-4 flex items-center justify-between">
+                  <h4 className="text-sm font-semibold text-white/80 flex items-center gap-2">
+                    <BookOpen className="h-4 w-4 text-cyan-400" />
+                    Answer Script Review Layer
+                  </h4>
+                  <p className="text-[10px] text-white/30 uppercase tracking-wider">
+                    Hover boxes for mark reasoning
+                  </p>
+                </div>
+
+                <div className="h-[560px] rounded-xl border border-white/10 bg-black/30 overflow-hidden">
+                  {scriptLoading ? (
+                    <div className="h-full flex items-center justify-center text-white/40">
+                      <Loader2 className="h-5 w-5 animate-spin mr-2" /> Loading answer script...
+                    </div>
+                  ) : scriptImageSrc ? (
+                    <AnnotationOverlay
+                      imageSrc={scriptImageSrc}
+                      annotations={scriptAnnotations}
+                      isScanning={false}
+                      showInlineDescription={false}
+                    />
+                  ) : (
+                    <div className="h-full flex flex-col items-center justify-center text-center px-6">
+                      <AlertTriangle className="h-8 w-8 text-amber-400/60 mb-2" />
+                      <p className="text-sm text-white/50">{scriptError || "Answer script not available"}</p>
+                    </div>
+                  )}
+                </div>
+              </div>
             </CardContent>
           </Card>
 
