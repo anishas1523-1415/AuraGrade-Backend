@@ -15,21 +15,38 @@ import { useCallback, useRef } from "react";
 export function useAuthFetch() {
   const supabaseRef = useRef<ReturnType<typeof createClient> | null>(null);
   if (!supabaseRef.current) {
-    supabaseRef.current = createClient();
+    try {
+      supabaseRef.current = createClient();
+    } catch {
+      supabaseRef.current = null;
+    }
   }
 
   return useCallback(
     async (url: string, options: RequestInit = {}): Promise<Response> => {
-      const {
-        data: { session },
-      } = await supabaseRef.current.auth.getSession();
+      let session = null;
+      if (supabaseRef.current) {
+        try {
+          const result = await supabaseRef.current.auth.getSession();
+          session = result.data.session;
+        } catch {
+          session = null;
+        }
+      }
 
       const headers = new Headers(options.headers);
       if (session?.access_token) {
         headers.set("Authorization", `Bearer ${session.access_token}`);
       }
 
-      return fetch(url, { ...options, headers });
+      try {
+        return await fetch(url, { ...options, headers });
+      } catch {
+        return new Response(JSON.stringify({ error: "Backend unavailable" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
     },
     []
   );

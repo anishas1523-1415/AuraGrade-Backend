@@ -168,6 +168,7 @@ export const StudentLogin: React.FC<{
       setIsSearching(true);
       setScanDone(false);
       setFoundName(null);
+      const startedAt = performance.now();
 
       abortRef.current?.abort();
       const controller = new AbortController();
@@ -181,6 +182,7 @@ export const StudentLogin: React.FC<{
         if (!res.ok) {
           if (res.status === 404) throw new Error("STUDENT_NOT_FOUND");
           if (res.status === 401) throw new Error("DOB_MISMATCH");
+          if (res.status === 403) throw new Error("ACCESS_DENIED");
           throw new Error("SERVER_ERROR");
         }
 
@@ -190,12 +192,10 @@ export const StudentLogin: React.FC<{
 
         setFoundName(student.name);
 
-        // Wait for the terminal animation to feel satisfying (min 2.6s)
-        const minDelay = Math.max(
-          0,
-          2600 - (Date.now() - performance.now()),
-        );
-        await new Promise((r) => setTimeout(r, minDelay > 200 ? 300 : minDelay));
+        // Keep the confirmation animation short so the portal feels responsive.
+        const elapsed = performance.now() - startedAt;
+        const remaining = Math.max(0, 900 - elapsed);
+        await new Promise((r) => setTimeout(r, remaining));
 
         setScanDone(true);
 
@@ -213,6 +213,8 @@ export const StudentLogin: React.FC<{
           );
         } else if (msg === "DOB_MISMATCH") {
           setError("Date of Birth does not match this register number.");
+        } else if (msg === "ACCESS_DENIED") {
+          setError("Your student account is not linked yet. Please contact the admin team.");
         } else {
           setError("Connection to institutional server failed. Try again.");
         }

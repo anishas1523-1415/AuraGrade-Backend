@@ -16,16 +16,20 @@ Loop in real-time.
 from __future__ import annotations
 
 import json
-import os
 import asyncio
+import os
 import importlib
 from typing import AsyncGenerator, Optional
+
+from app.config import get_settings
 
 from google import genai
 from google.genai import types
 
 from image_processor import deskew_and_enhance, process_image_async
 from gemini_retry import call_gemini, call_gemini_async, parse_response, QuotaExhaustedError, get_quota_wait_seconds, _rotate_client
+
+ASYNC_GAP_SYNC = os.environ.get("ASYNC_GAP_SYNC", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 
 # ---------------------------------------------------------------------------
@@ -37,11 +41,9 @@ _pinecone_index = None
 
 def _resolve_pinecone_index_name() -> str:
     """Support both legacy and new index env names."""
-    return (
-        os.environ.get("PINECONE_INDEX")
-        or os.environ.get("PINECONE_INDEX_NAME")
-        or "auragrade"
-    )
+    settings = get_settings()
+    return settings.PINECONE_API_KEY or "auragrade"
+
 
 
 def _get_pinecone_index():
@@ -50,7 +52,8 @@ def _get_pinecone_index():
     if _pinecone_index is not None:
         return _pinecone_index
 
-    api_key = os.environ.get("PINECONE_API_KEY")
+    settings = get_settings()
+    api_key = settings.PINECONE_API_KEY
     index_name = _resolve_pinecone_index_name()
 
     if not api_key:
@@ -72,13 +75,16 @@ def _get_pinecone_index():
 # ---------------------------------------------------------------------------
 
 _gemini_client: genai.Client | None = None
-HUMAN_REVIEW_CONFIDENCE_THRESHOLD = int(os.environ.get("HUMAN_REVIEW_CONFIDENCE_THRESHOLD", "85"))
-FAST_EVAL_MODE = os.environ.get("FAST_EVAL_MODE", "1").strip().lower() in {"1", "true", "yes", "on"}
-ENABLE_DIAGRAM_PASS = os.environ.get("ENABLE_DIAGRAM_PASS", "0" if FAST_EVAL_MODE else "1").strip().lower() in {"1", "true", "yes", "on"}
-ENABLE_AUDIT_PASS = os.environ.get("ENABLE_AUDIT_PASS", "0" if FAST_EVAL_MODE else "1").strip().lower() in {"1", "true", "yes", "on"}
-ENABLE_SENTINEL_PASS = os.environ.get("ENABLE_SENTINEL_PASS", "0" if FAST_EVAL_MODE else "1").strip().lower() in {"1", "true", "yes", "on"}
-ASYNC_GAP_SYNC = os.environ.get("ASYNC_GAP_SYNC", "1").strip().lower() in {"1", "true", "yes", "on"}
-STAGE_TIMEOUT_SECONDS = int(os.environ.get("STAGE_TIMEOUT_SECONDS", "90"))
+
+settings = get_settings()
+HUMAN_REVIEW_CONFIDENCE_THRESHOLD = settings.HUMAN_REVIEW_CONFIDENCE_THRESHOLD
+FAST_EVAL_MODE = settings.FAST_EVAL_MODE
+ENABLE_DIAGRAM_PASS = settings.ENABLE_DIAGRAM_PASS
+ENABLE_AUDIT_PASS = settings.ENABLE_AUDIT_PASS
+ENABLE_SENTINEL_PASS = settings.ENABLE_SENTINEL_PASS
+STAGE_TIMEOUT_SECONDS = settings.STAGE_TIMEOUT_SECONDS
+
+
 
 PASS1_RESPONSE_SCHEMA = {
     "type": "object",
@@ -116,10 +122,12 @@ PASS2_RESPONSE_SCHEMA = {
 def get_gemini_client() -> genai.Client:
     global _gemini_client
     if _gemini_client is None:
+        settings = get_settings()
         _gemini_client = genai.Client(
-            api_key=os.environ.get("GEMINI_API_KEY")
+            api_key=settings.GEMINI_API_KEY
         )
     return _gemini_client
+
 
 
 def set_gemini_client(client: genai.Client):
@@ -458,6 +466,13 @@ compare the student's answer STRICTLY against it — not against your own knowle
 - Diagrams: Check arrows, labels, and logical flow, not artistic quality.
 - Do NOT award marks for "correct general knowledge" that the rubric doesn't ask for.
 - Grade exactly what the rubric specifies — no more, no less.
+- If the response satisfies all rubric requirements for a question, award the full marks for that question.
+- Do not deduct marks for sentence order, paraphrasing, spacing, or handwriting style when the required rubric meaning is present.
+- If a student answer clearly matches the rubric/model answer, prefer awarding marks rather than inventing extra deductions.
+- For every deduction you apply, you must tie it to a specific rubric item or critical_penalties rule.
+- For every correct rubric element you identify, emit a positive spatial annotation near the matching region using type "key_term", "diagram", or "partial" with positive points.
+- For every deduction, emit a negative spatial annotation using type "penalty" or "error" with negative points and a concise reason.
+- If a question is fully correct, do not under-score it; award the full question marks and annotate the correct regions in green.
 
 {rag_section}
 {diagram_context}
@@ -611,13 +626,17 @@ async def agentic_grade_stream(
         }, indent=2)
 
     # ── Pre-processing: auto-rotate & enhance for better OCR ───
-    processed_bytes = await process_image_async(image_bytes)
+    # In fast mode, skip preprocessing to save time, use original bytes
     fast_mode = FAST_EVAL_MODE
+    if fast_mode:
+        processed_bytes = image_bytes
+    else:
+        processed_bytes = await process_image_async(image_bytes)
 
     try:
         diagram_result = None
         diagram_context = ""  # injected into grader prompt
-        if ENABLE_DIAGRAM_PASS and not fast_mode:
+        if ENABLE_DIAGRAM_PASS:
             # ── Step 0: PASS 0 — Diagram-to-Code Validation ───────────
             yield _sse_event("step", {
                 "icon": "📐",
@@ -722,49 +741,57 @@ Deduct marks for genuine logic flaws identified above.
         else:
             yield _sse_event("step", {
                 "icon": "⚡",
-                "text": "Fast mode enabled — skipping diagram pass for speed.",
+                "text": "Diagram pass disabled — skipping diagram validation.",
                 "phase": "diagram_fast_skip",
             })
 
-        # ── Step 1: Extracting handwriting ────────────────────────
-        yield _sse_event("step", {
-            "icon": "🔍",
-            "text": "Extracting handwriting using Document AI…",
-            "phase": "extract",
-        })
+        # ── Step 1 & 2: Skip verbose steps in fast mode ────────────────────
         if not fast_mode:
-            await asyncio.sleep(0.1)  # let the UI render
-
-        # ── Step 2: RAG — retrieve model-answer context ───────────
-        yield _sse_event("step", {
-            "icon": "📚",
-            "text": "Cross-referencing with Model Answer in vector store…",
-            "phase": "rag",
-        })
-
-        rag_context = await retrieve_model_answer_context(
-            "student answer evaluation",
-            assessment_id=assessment_id,
-        )
-
-        if rag_context:
-            yield _sse_event("rag", {
-                "status": "retrieved",
-                "chunks": rag_context.count("---") + 1,
+            yield _sse_event("step", {
+                "icon": "🔍",
+                "text": "Extracting handwriting using Document AI…",
+                "phase": "extract",
             })
+
+        # ── RAG — retrieve model-answer context (skip if no Pinecone) ───
+        rag_context = ""
+        has_pinecone = _get_pinecone_index() is not None
+        
+        if has_pinecone:
+            if not fast_mode:
+                yield _sse_event("step", {
+                    "icon": "📚",
+                    "text": "Cross-referencing with Model Answer in vector store…",
+                    "phase": "rag",
+                })
+
+            rag_context = await retrieve_model_answer_context(
+                "student answer evaluation",
+                assessment_id=assessment_id,
+            )
+
+            if rag_context:
+                yield _sse_event("rag", {
+                    "status": "retrieved",
+                    "chunks": rag_context.count("---") + 1,
+                })
+            else:
+                if not fast_mode:
+                    yield _sse_event("rag", {
+                        "status": "skipped",
+                        "reason": "No model answers indexed",
+                    })
         else:
-            yield _sse_event("rag", {
-                "status": "skipped",
-                "reason": "Pinecone not configured or no model answers indexed",
-            })
-
-        if not fast_mode:
-            await asyncio.sleep(0.05)
+            if not fast_mode:
+                yield _sse_event("rag", {
+                    "status": "skipped",
+                    "reason": "Pinecone not configured",
+                })
 
         # ── Step 3: PASS 1 — Grader Agent ─────────────────────────
         yield _sse_event("step", {
             "icon": "🤖",
-            "text": "Pass 1 — Grader Agent evaluating answer script…",
+            "text": "Evaluating answer script…",
             "phase": "pass1",
         })
 
@@ -782,12 +809,12 @@ Deduct marks for genuine logic flaws identified above.
         )
 
         pass1_response = None
-        for _attempt in range(4):
+        for _attempt in range(2):  # Reduced from 4 to 2 retries for speed
             try:
                 pass1_response = await asyncio.wait_for(
                     call_gemini_async(
                         client,
-                        model="gemini-3-flash-preview",
+                        model="gemini-2.5-flash",  # Supported fast model
                         contents=[
                             types.Part.from_bytes(data=processed_bytes, mime_type="image/jpeg"),
                             grader_prompt,
@@ -803,32 +830,24 @@ Deduct marks for genuine logic flaws identified above.
                 )
                 break  # success
             except QuotaExhaustedError as qe:
-                if _attempt >= 3:
+                if _attempt >= 1:  # Only 1 retry for quota
                     raise
-                wait_secs = max(qe.wait_seconds, 15)
-                remaining = wait_secs
-                while remaining > 0:
-                    yield _sse_event("step", {
-                        "icon": "⏳",
-                        "text": f"API quota reached — waiting {int(remaining)}s for reset… (retry {_attempt + 2}/4)",
-                        "phase": "quota_wait",
-                    })
-                    await asyncio.sleep(min(5, remaining))
-                    remaining -= 5
+                wait_secs = max(qe.wait_seconds, 5)  # Reduced from 15
+                yield _sse_event("step", {
+                    "icon": "⏳",
+                    "text": f"API quota — retrying in {wait_secs}s…",
+                    "phase": "quota_wait",
+                })
+                await asyncio.sleep(min(5, wait_secs))  # Don't wait full duration
                 refreshed = _rotate_client()
                 if refreshed:
                     client = refreshed
-                yield _sse_event("step", {
-                    "icon": "🔄",
-                    "text": "Retrying Grader Agent…",
-                    "phase": "quota_retry",
-                })
             except TimeoutError:
-                if _attempt >= 3:
-                    raise RuntimeError("Pass 1 timed out — please retry with a clearer image or lower load")
+                if _attempt >= 1:
+                    raise RuntimeError("Evaluation timed out — please retry")
                 yield _sse_event("step", {
                     "icon": "⚠️",
-                    "text": f"Pass 1 timeout after {STAGE_TIMEOUT_SECONDS}s — retrying…",
+                    "text": "Timeout — retrying…",
                     "phase": "pass1_timeout_retry",
                 })
                 refreshed = _rotate_client()
@@ -876,69 +895,92 @@ Deduct marks for genuine logic flaws identified above.
 
         yield _sse_event("pass1", pass1_result)
 
-        # Emit per-question breakdown and penalties for the UI
-        pq_scores = pass1_result.get("per_question_scores", {})
-        if pq_scores:
-            yield _sse_event("step", {
-                "icon": "📝",
-                "text": f"Per-Q scores: {', '.join(f'{k}={v}' for k, v in pq_scores.items())}",
-                "phase": "per_question",
-            })
-
-        penalties = pass1_result.get("penalties_applied", [])
-        if penalties:
-            yield _sse_event("step", {
-                "icon": "🚨",
-                "text": f"Critical penalties applied: {'; '.join(penalties[:3])}",
-                "phase": "penalties",
-            })
-
         # Emit annotation overlay data for the frontend canvas
         # Convert Gemini box_2d [ymin,xmin,ymax,xmax] (0-1000) → frontend %
-        # Stream annotations incrementally via pass1_partial for reduced perceived latency
+        # Skip granular streaming in fast mode for speed
         raw_annotations = pass1_result.get("spatial_annotations", [])
         indexed_annotations = []
         if raw_annotations and isinstance(raw_annotations, list):
-            for i, ann in enumerate(raw_annotations):
-                if isinstance(ann, dict):
-                    coords = map_to_frontend_coords(ann.get("box_2d", []))
-                    annotation_obj = {
-                        "id": f"ann_{i}",
-                        "type": ann.get("type", "key_term"),
-                        "label": ann.get("label", f"Region {i+1}"),
-                        "description": ann.get("description", ""),
-                        "points": ann.get("points", 0),
-                        "reviewState": "pending",
-                        **coords,
-                    }
-                    indexed_annotations.append(annotation_obj)
-                    # Emit each annotation individually for box-by-box streaming
-                    yield _sse_event("pass1_partial", {
-                        "new_annotations": [annotation_obj],
-                    })
-                    if not fast_mode:
-                        await asyncio.sleep(0.05)  # stagger for visual effect
-            # Also emit the full batch for backward compatibility
-            if indexed_annotations:
-                yield _sse_event("annotations", {"annotations": indexed_annotations})
+            if fast_mode:
+                # In fast mode, just convert and emit all at once
+                for i, ann in enumerate(raw_annotations):
+                    if isinstance(ann, dict):
+                        coords = map_to_frontend_coords(ann.get("box_2d", []))
+                        indexed_annotations.append({
+                            "id": f"ann_{i}",
+                            "type": ann.get("type", "key_term"),
+                            "label": ann.get("label", f"Region {i+1}"),
+                            "description": ann.get("description", ""),
+                            "points": ann.get("points", 0),
+                            "reviewState": "pending",
+                            **coords,
+                        })
+                if indexed_annotations:
+                    yield _sse_event("annotations", {"annotations": indexed_annotations})
+            else:
+                # In slow mode, stream incrementally
+                for i, ann in enumerate(raw_annotations):
+                    if isinstance(ann, dict):
+                        coords = map_to_frontend_coords(ann.get("box_2d", []))
+                        annotation_obj = {
+                            "id": f"ann_{i}",
+                            "type": ann.get("type", "key_term"),
+                            "label": ann.get("label", f"Region {i+1}"),
+                            "description": ann.get("description", ""),
+                            "points": ann.get("points", 0),
+                            "reviewState": "pending",
+                            **coords,
+                        }
+                        indexed_annotations.append(annotation_obj)
+                        # Emit each annotation individually for box-by-box streaming
+                        yield _sse_event("pass1_partial", {
+                            "new_annotations": [annotation_obj],
+                        })
+                        await asyncio.sleep(0.02)  # Minimal stagger
+                # Also emit the full batch for backward compatibility
+                if indexed_annotations:
+                    yield _sse_event("annotations", {"annotations": indexed_annotations})
 
-        # Emit granular sub-steps from Pass 1
-        key_terms = pass1_result.get("detected_key_terms", [])
-        if key_terms:
-            yield _sse_event("step", {
-                "icon": "🔑",
-                "text": f"Detected {len(key_terms)} key terms: {', '.join(key_terms[:6])}{'…' if len(key_terms) > 6 else ''}",
-                "phase": "key_terms",
-            })
-
-        yield _sse_event("step", {
-            "icon": "📊",
-            "text": f"Pass 1 complete — initial score: {pass1_result['score']}/15 (confidence {pass1_result['confidence']:.0%})",
-            "phase": "pass1_done",
-        })
-
+        # Emit per-question breakdown and penalties for the UI (skip in fast mode)
         if not fast_mode:
-            await asyncio.sleep(0.1)
+            pq_scores = pass1_result.get("per_question_scores", {})
+            if pq_scores:
+                yield _sse_event("step", {
+                    "icon": "📝",
+                    "text": f"Per-Q scores: {', '.join(f'{k}={v}' for k, v in pq_scores.items())}",
+                    "phase": "per_question",
+                })
+
+            penalties = pass1_result.get("penalties_applied", [])
+            if penalties:
+                yield _sse_event("step", {
+                    "icon": "🚨",
+                    "text": f"Critical penalties applied: {'; '.join(penalties[:3])}",
+                    "phase": "penalties",
+                })
+
+            # Emit granular sub-steps from Pass 1 (only in slow mode)
+            key_terms = pass1_result.get("detected_key_terms", [])
+            if key_terms:
+                yield _sse_event("step", {
+                    "icon": "🔑",
+                    "text": f"Detected {len(key_terms)} key terms: {', '.join(key_terms[:6])}{'…' if len(key_terms) > 6 else ''}",
+                    "phase": "key_terms",
+                })
+
+            yield _sse_event("step", {
+                "icon": "📊",
+                "text": f"Pass 1 complete — initial score: {pass1_result['score']}/15 (confidence {pass1_result['confidence']:.0%})",
+                "phase": "pass1_done",
+            })
+            await asyncio.sleep(0.05)
+        else:
+            # In fast mode, only emit brief completion
+            yield _sse_event("step", {
+                "icon": "📊",
+                "text": f"Score: {pass1_result['score']} (confidence {pass1_result['confidence']:.0%})",
+                "phase": "pass1_done",
+            })
 
         # ── Step 4: PASS 2 — Professor Audit Agent ────────────────
         if ENABLE_AUDIT_PASS and not fast_mode:

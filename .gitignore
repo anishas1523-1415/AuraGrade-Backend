@@ -4,18 +4,34 @@ node_modules/
 
 # Python
 .venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
 
-# Environment
+# Environment & Secrets — NEVER commit these
 .env
 .env.*
 .env.local
+*.env
+backend/keys
+backend/.env
+backend/.env.local
+backend/.env.production
+secrets/
+*.key
+*.pem
 
-# VSCode
+# VSCode / IDE
 .vscode/
+.idea/
+*.swp
+*.swo
 
 # OS
 .DS_Store
 Thumbs.db
+desktop.ini
 
 # Build
 build/
@@ -23,19 +39,16 @@ dist/
 
 # Logs
 *.log
+logs/
+
+# TypeScript
+*.tsbuildinfo
 
 # Misc
-*.pyc
-*.pyo
-*.pyd
-*.tsbuildinfo
 *.zip
 
 # Local packaging artifacts
 .zipbuild/
 
-# Local secret file
-backend/keys
-
-# Ignore secrets
+# Local scripts with secrets
 start-backend.bat

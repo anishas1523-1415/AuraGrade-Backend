@@ -97,6 +97,8 @@ const GradingDashboard = () => {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [selectedFileIsPdf, setSelectedFileIsPdf] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [pdfPagePreviews, setPdfPagePreviews] = useState<string[]>([]);
+  const [previewLoading, setPreviewLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const feedbackEndRef = useRef<HTMLDivElement>(null);
@@ -169,52 +171,89 @@ const GradingDashboard = () => {
   /*  Handlers                                                         */
   /* ---------------------------------------------------------------- */
 
+  const withTimeout = async <T,>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> => {
+    let timer: number | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<T>((_, reject) => {
+          timer = window.setTimeout(() => reject(new Error(`${label} timeout`)), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) window.clearTimeout(timer);
+    }
+  };
+
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     setSelectedFile(file);
-    // Revoke previous blob URL to prevent memory leak
-    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    // Revoke previous blob URL to prevent memory leaks.
+    if (previewUrl?.startsWith("blob:")) URL.revokeObjectURL(previewUrl);
+    setPdfPagePreviews([]);
 
     // ── Preview: handle PDFs by converting to image via backend ──
     const isPdf =
       file.type === "application/pdf" ||
       file.name.toLowerCase().endsWith(".pdf");
     setSelectedFileIsPdf(isPdf);
+    setPreviewLoading(true);
 
     if (isPdf) {
-      // PDF can't render as <img> — request backend conversion
-      setPreviewUrl(null); // clear while loading
-      try {
-        const pdfForm = new FormData();
-        pdfForm.append("file", file);
-        const pdfRes = await authFetch(`${API_URL}/api/pdf-preview`, {
-          method: "POST",
-          body: pdfForm,
-        });
-        if (pdfRes.ok) {
-          const pdfData = await pdfRes.json();
-          if (pdfData.preview) {
-            setPreviewUrl(pdfData.preview); // data:image/jpeg;base64,...
-            setSelectedFileIsPdf(false);
-          } else {
-            // Fallback: show browser PDF viewer if image preview is unavailable.
-            setPreviewUrl(URL.createObjectURL(file));
-            setSelectedFileIsPdf(true);
+      // Show native PDF preview immediately; enhance to per-page images in background.
+      const localPdfUrl = URL.createObjectURL(file);
+      setPreviewUrl(localPdfUrl);
+      setSelectedFileIsPdf(true);
+      setPreviewLoading(false);
+
+      void (async () => {
+        try {
+          const pdfForm = new FormData();
+          pdfForm.append("file", file);
+          let pdfRes = await withTimeout(
+            authFetch(`${API_URL}/api/pdf-preview`, {
+              method: "POST",
+              body: pdfForm,
+            }),
+            8000,
+            "PDF preview",
+          );
+
+          if (!pdfRes.ok) {
+            const retryForm = new FormData();
+            retryForm.append("file", file);
+            pdfRes = await withTimeout(
+              fetch(`${API_URL}/api/pdf-preview`, {
+                method: "POST",
+                body: retryForm,
+              }),
+              8000,
+              "PDF preview retry",
+            );
           }
-        } else {
-          setPreviewUrl(URL.createObjectURL(file));
-          setSelectedFileIsPdf(true);
+
+          if (pdfRes.ok) {
+            const pdfData = await pdfRes.json();
+            const pages = Array.isArray(pdfData.preview_pages)
+              ? (pdfData.preview_pages as string[])
+              : [];
+            if (pages.length > 1) {
+              setPdfPagePreviews(pages);
+              setPreviewUrl(pages[0]);
+              setSelectedFileIsPdf(false);
+            }
+          }
+        } catch (err) {
+          console.warn("⚠️ PDF preview enhancement skipped", err);
         }
-      } catch {
-        console.warn("⚠️ PDF preview conversion failed");
-        setPreviewUrl(URL.createObjectURL(file));
-        setSelectedFileIsPdf(true);
-      }
+      })();
     } else {
       setSelectedFileIsPdf(false);
+      setPdfPagePreviews([]);
       setPreviewUrl(URL.createObjectURL(file));
+      setPreviewLoading(false);
     }
 
     setFeedback([]);
@@ -236,32 +275,30 @@ const GradingDashboard = () => {
     setPerQuestionScores({});
     setPenaltiesApplied([]);
 
-    // ── Auto-detect student from answer-sheet header ──────────
-    try {
-      const headerForm = new FormData();
-      headerForm.append("file", file);
-      const detection = await authFetch(`${API_URL}/api/parse-header`, {
-        method: "POST",
-        body: headerForm,
-      });
-      if (detection.ok) {
-        const data = await detection.json();
-        // Auto-fill student dropdown
-        const regNo =
-          data.student?.reg_no ?? data.header?.reg_no;
-        if (regNo && regNo !== "FLAG_FOR_MANUAL") {
-          setStudentRegNo(regNo);
+    // ── Auto-detect header in background (non-blocking for faster preview) ──
+    void (async () => {
+      try {
+        const headerForm = new FormData();
+        headerForm.append("file", file);
+        const detection = await authFetch(`${API_URL}/api/parse-header`, {
+          method: "POST",
+          body: headerForm,
+        });
+        if (detection.ok) {
+          const data = await detection.json();
+          const regNo = data.student?.reg_no ?? data.header?.reg_no;
+          if (regNo && regNo !== "FLAG_FOR_MANUAL") {
+            setStudentRegNo(regNo);
+          }
+          const assessmentId = data.assessment?.id;
+          if (assessmentId) {
+            setSelectedAssessment(assessmentId);
+          }
         }
-        // Auto-fill assessment dropdown
-        const assessmentId = data.assessment?.id;
-        if (assessmentId) {
-          setSelectedAssessment(assessmentId);
-        }
+      } catch {
+        console.warn("⚠️ Auto-detect header failed — manual selection required");
       }
-    } catch {
-      // Header detection is best-effort; failure is non-blocking
-      console.warn("⚠️ Auto-detect header failed — manual selection required");
-    }
+    })();
   };
 
   const startGrading = async () => {
@@ -334,7 +371,7 @@ const GradingDashboard = () => {
 
       // POST with fetch, then read the response body as an SSE stream
       const timeoutController = new AbortController();
-      const timeoutId = window.setTimeout(() => timeoutController.abort(), 180000);
+      const timeoutId = window.setTimeout(() => timeoutController.abort(), 90000);  // 90s total timeout
       const response = await authFetch(url, { method: "POST", body: formData, signal: timeoutController.signal });
       window.clearTimeout(timeoutId);
 
@@ -354,7 +391,11 @@ const GradingDashboard = () => {
       let buffer = "";
 
       while (true) {
-        const { done, value } = await reader.read();
+        const { done, value } = await withTimeout(
+          reader.read(),
+          60000,  // Reduced from 120s to 60s per chunk
+          "Evaluator stream chunk",
+        );
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
@@ -818,6 +859,83 @@ const GradingDashboard = () => {
       : "bg-blue-400 animate-pulse"
     : "bg-emerald-400";
 
+  const renderPreview = () => {
+    if (previewLoading && !previewUrl) {
+      return (
+        <div className="flex h-full min-h-[360px] items-center justify-center bg-black/10 px-6 text-center text-white/45">
+          <div className="space-y-3">
+            <Loader2 className="mx-auto h-8 w-8 animate-spin text-cyan-400" />
+            <p className="text-sm font-medium">Preparing script preview...</p>
+            <p className="text-xs text-white/25">This may take a few seconds for PDF files.</p>
+          </div>
+        </div>
+      );
+    }
+
+    if (!previewUrl) {
+      return (
+        <div className="flex-1 flex items-center justify-center">
+          <div
+            className="flex flex-col items-center justify-center py-24 text-white/30 cursor-pointer hover:text-white/50 transition-colors"
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <UploadCloud className="h-16 w-16 mb-4 opacity-40" />
+            <p className="text-base font-medium">Click to upload an answer script</p>
+            <p className="text-xs text-white/20 mt-1">PNG, JPG, PDF — or use the Upload button</p>
+          </div>
+        </div>
+      );
+    }
+
+    if (selectedFileIsPdf) {
+      return (
+        <object
+          data={previewUrl}
+          type="application/pdf"
+          className="w-full h-full min-h-[360px] border-0 bg-slate-950"
+        >
+          <div className="flex h-full min-h-[360px] items-center justify-center px-6 text-center text-white/50">
+            <div className="space-y-3">
+              <FileText className="mx-auto h-8 w-8 text-cyan-400" />
+              <p className="text-sm font-medium">PDF preview is unavailable in this browser.</p>
+              <p className="text-xs text-white/25">
+                The file is loaded and ready for grading. Open it in a new tab if needed.
+              </p>
+            </div>
+          </div>
+        </object>
+      );
+    }
+
+    if (pdfPagePreviews.length > 1) {
+      return (
+        <div className="h-full min-h-[360px] overflow-auto bg-black/10 p-3 space-y-3">
+          {pdfPagePreviews.map((src, idx) => (
+            <div key={idx} className="rounded-lg border border-white/10 bg-black/20 overflow-hidden">
+              <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-white/40 border-b border-white/10">
+                Page {idx + 1}
+              </div>
+              <img src={src} alt={`PDF page ${idx + 1}`} className="block w-full h-auto" draggable={false} />
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    return (
+      <div className="flex-1 min-h-0">
+        <AnnotationOverlay
+          imageSrc={previewUrl}
+          annotations={annotations}
+          isScanning={isGrading && score === null}
+          onAnnotationClick={(a) =>
+            setFeedback((prev) => [...prev, `🔎 ${a.label}: ${a.description}`])
+          }
+        />
+      </div>
+    );
+  };
+
   /* ---------------------------------------------------------------- */
   /*  Render                                                           */
   /* ---------------------------------------------------------------- */
@@ -1046,42 +1164,7 @@ const GradingDashboard = () => {
               </div>
             )}
 
-            {previewUrl ? (
-              selectedFileIsPdf ? (
-                <iframe
-                  src={previewUrl}
-                  title="Uploaded script PDF"
-                  className="w-full h-full border-0"
-                />
-              ) : (
-                <AnnotationOverlay
-                  imageSrc={previewUrl}
-                  annotations={annotations}
-                  isScanning={isGrading && score === null}
-                  onAnnotationClick={(a) =>
-                    setFeedback((prev) => [
-                      ...prev,
-                      `🔎 ${a.label}: ${a.description}`,
-                    ])
-                  }
-                />
-              )
-            ) : (
-              <div className="flex-1 flex items-center justify-center">
-                <div
-                  className="flex flex-col items-center justify-center py-24 text-white/30 cursor-pointer hover:text-white/50 transition-colors"
-                  onClick={() => fileInputRef.current?.click()}
-                >
-                  <UploadCloud className="h-16 w-16 mb-4 opacity-40" />
-                  <p className="text-base font-medium">
-                    Click to upload an answer script
-                  </p>
-                  <p className="text-xs text-white/20 mt-1">
-                    PNG, JPG, PDF — or use the Upload button
-                  </p>
-                </div>
-              </div>
-            )}
+            {renderPreview()}
           </Card>
 
           {/* ---------- RIGHT: AI Intelligence Panel ---------- */}

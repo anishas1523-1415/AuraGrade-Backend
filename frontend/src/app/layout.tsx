@@ -1,11 +1,24 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { AuthProvider } from "@/lib/auth-context";
 import { Toaster } from "react-hot-toast";
+import { ErrorBoundary } from "@/components/ui/ErrorBoundary";
 
 export const metadata: Metadata = {
-  title: "AuraGrade AI Engine",
-  description: "AI-powered exam grading dashboard",
+  title: {
+    default: "AuraGrade AI Engine",
+    template: "%s | AuraGrade",
+  },
+  description:
+    "Enterprise AI-powered exam grading platform with digital seals, audit trails, and role-based access control.",
+  keywords: ["AI grading", "exam evaluation", "education technology", "AuraGrade"],
+  authors: [{ name: "AuraGrade Team" }],
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  themeColor: "#0f172a",
 };
 
 export default function RootLayout({
@@ -16,7 +29,9 @@ export default function RootLayout({
   return (
     <html lang="en" className="dark">
       <body className="antialiased">
-        <AuthProvider>{children}</AuthProvider>
+        <ErrorBoundary>
+          <AuthProvider>{children}</AuthProvider>
+        </ErrorBoundary>
         <Toaster
           position="top-right"
           toastOptions={{

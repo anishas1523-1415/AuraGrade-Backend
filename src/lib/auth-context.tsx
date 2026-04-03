@@ -51,37 +51,66 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
 
+  const buildFallbackProfile = useCallback((currentUser: User): Profile => {
+    const email = currentUser.email || "";
+    const fullName =
+      currentUser.user_metadata?.full_name ||
+      currentUser.user_metadata?.name ||
+      email.split("@")[0] ||
+      "Evaluator";
+
+    return {
+      id: currentUser.id,
+      full_name: fullName,
+      email,
+      department: "",
+      role: "EVALUATOR",
+    };
+  }, []);
+
   /* ---------- Fetch profile from profiles table ---------- */
   const fetchProfile = useCallback(
-    async (userId: string) => {
+    async (currentUser: User) => {
       try {
         const { data } = await supabase
           .from("profiles")
           .select("*")
-          .eq("id", userId)
+          .eq("id", currentUser.id)
           .single();
-        setProfile(data as Profile | null);
+        if (data) {
+          setProfile(data as Profile);
+        } else {
+          setProfile(buildFallbackProfile(currentUser));
+        }
       } catch {
-        setProfile(null);
+        setProfile(buildFallbackProfile(currentUser));
       }
     },
-    [supabase],
+    [supabase, buildFallbackProfile],
   );
 
   /* ---------- Initialize session ---------- */
   useEffect(() => {
     const init = async () => {
-      const {
-        data: { session: currentSession },
-      } = await supabase.auth.getSession();
+      try {
+        const {
+          data: { session: currentSession },
+        } = await supabase.auth.getSession();
 
-      setSession(currentSession);
-      setUser(currentSession?.user ?? null);
+        setSession(currentSession);
+        setUser(currentSession?.user ?? null);
 
-      if (currentSession?.user) {
-        await fetchProfile(currentSession.user.id);
+        if (currentSession?.user) {
+          await fetchProfile(currentSession.user);
+        }
+      } catch (err) {
+        void err;
+        setSession(null);
+        setUser(null);
+        setProfile(null);
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     };
 
     init();
@@ -90,15 +119,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange(async (_event, newSession) => {
-      setSession(newSession);
-      setUser(newSession?.user ?? null);
+      try {
+        setSession(newSession);
+        setUser(newSession?.user ?? null);
 
-      if (newSession?.user) {
-        await fetchProfile(newSession.user.id);
-      } else {
-        setProfile(null);
+        if (newSession?.user) {
+          await fetchProfile(newSession.user);
+        } else {
+          setProfile(null);
+        }
+      } catch (err) {
+        void err;
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     });
 
     return () => subscription.unsubscribe();
@@ -113,7 +147,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [supabase]);
 
   const refreshProfile = useCallback(async () => {
-    if (user) await fetchProfile(user.id);
+    if (user) await fetchProfile(user);
   }, [user, fetchProfile]);
 
   /* ---------- Role helpers ---------- */

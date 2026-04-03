@@ -67,9 +67,9 @@ VALUES
   ('23TUAD058', 'MOHANA A', '727823tuad058@skct.edu.in', '2005-12-22', 'Data Science'),
   ('23TUAD059', 'MOHANAPRIYAN M', '727823tuad059@skct.edu.in', '2006-01-18', 'Data Science'),
   ('23TUAD060', 'MANOJ BBOOPATHI G R', '727823tuad060@skct.edu.in', '2005-11-24', 'Data Science'),
-  ('23TUAD061', 'DIVITH L', NULL, '2004-12-10', 'Data Science'),
-  ('23TUAD062', 'KAMAL S', NULL, '2006-01-03', 'Data Science'),
-  ('23TUAD063', 'MOHANRAMU M', NULL, '2002-11-28', 'Data Science')
+  ('23TUAD061', 'DIVITH L', '23tuad061@example.edu', '2004-12-10', 'Data Science'),
+  ('23TUAD062', 'KAMAL S', '23tuad062@example.edu', '2006-01-03', 'Data Science'),
+  ('23TUAD063', 'MOHANRAMU M', '23tuad063@example.edu', '2002-11-28', 'Data Science')
 ON CONFLICT (reg_no) DO UPDATE SET
   name = EXCLUDED.name,
   email = COALESCE(EXCLUDED.email, students.email),

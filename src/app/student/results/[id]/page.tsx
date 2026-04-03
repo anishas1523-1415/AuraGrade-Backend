@@ -204,7 +204,7 @@ export default function StudentResultPage() {
         }
       }
     } catch (err) {
-      console.error("Audit stream error:", err);
+      void err;
     } finally {
       setAuditRunning(false);
     }

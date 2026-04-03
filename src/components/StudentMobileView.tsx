@@ -346,7 +346,7 @@ export const StudentMobileView: React.FC<{ gradeId: string }> = ({
         }
       }
     } catch (err) {
-      console.error(err);
+      void err;
     } finally {
       setAuditRunning(false);
     }

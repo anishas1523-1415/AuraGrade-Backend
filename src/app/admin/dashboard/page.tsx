@@ -218,7 +218,7 @@ export default function AdminDashboard() {
       if (auditRes.ok) setAuditRecords(await auditRes.json());
       if (assessmentsRes.ok) setAssessments(await assessmentsRes.json());
     } catch (err) {
-      console.error("Failed to fetch admin data:", err);
+      void err;
     } finally {
       setLoading(false);
     }
@@ -231,7 +231,7 @@ export default function AdminDashboard() {
       const logsRes = await authFetch(`${API_URL}/api/audit-logs?limit=50`);
       if (logsRes.ok) setAuditLogs(await logsRes.json());
     } catch (err) {
-      console.error("Failed to fetch audit logs:", err);
+      void err;
     } finally {
       setLoading(false);
     }
@@ -254,7 +254,7 @@ export default function AdminDashboard() {
       const res = await authFetch(`${API_URL}/api/assessments/${assessmentId}/lock-status`);
       if (res.ok) setLockStatus(await res.json());
     } catch (err) {
-      console.error("Failed to fetch lock status:", err);
+      void err;
     }
   }, []);
 
@@ -265,7 +265,7 @@ export default function AdminDashboard() {
       const res = await authFetch(`${API_URL}/api/ledger/${assessmentId}/preview`);
       if (res.ok) setLedgerPreview(await res.json());
     } catch (err) {
-      console.error("Failed to fetch ledger preview:", err);
+      void err;
     } finally {
       setPreviewLoading(false);
     }
@@ -292,7 +292,7 @@ export default function AdminDashboard() {
         await fetchAll();
       }
     } catch (err) {
-      console.error("Lock failed:", err);
+      void err;
     } finally {
       setLocking(false);
     }
@@ -314,7 +314,7 @@ export default function AdminDashboard() {
         await fetchLockStatus(selectedAssessmentId);
       }
     } catch (err) {
-      console.error("Download failed:", err);
+      void err;
     } finally {
       setDownloading(false);
     }

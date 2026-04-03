@@ -164,7 +164,7 @@ export const AnnotationOverlay: React.FC<AnnotationOverlayProps> = ({
 
   /* ---------- render ---------- */
   return (
-    <div className="relative flex flex-col h-full w-full select-none">
+    <div className="relative flex h-full min-h-0 w-full select-none flex-col">
       {/* ─── Toolbar ─── */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-white/10 bg-black/30 backdrop-blur-xl z-30 shrink-0">
         {/* Left: Legend chips */}
@@ -223,7 +223,7 @@ export const AnnotationOverlay: React.FC<AnnotationOverlayProps> = ({
       {/* ─── Canvas area ─── */}
       <div
         ref={containerRef}
-        className="relative flex-1 overflow-auto cursor-grab active:cursor-grabbing"
+        className="relative flex-1 min-h-0 overflow-auto cursor-grab active:cursor-grabbing bg-black/10"
         onWheel={handleWheel}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
@@ -231,7 +231,7 @@ export const AnnotationOverlay: React.FC<AnnotationOverlayProps> = ({
         onPointerLeave={handlePointerUp}
       >
         <div
-          className="relative w-full h-full transition-transform duration-150 origin-center"
+          className="relative min-h-full w-full transition-transform duration-150 origin-center"
           style={{
             transform: `scale(${zoom}) translate(${pan.x / zoom}px, ${pan.y / zoom}px)`,
           }}
@@ -240,7 +240,7 @@ export const AnnotationOverlay: React.FC<AnnotationOverlayProps> = ({
           <img
             src={imageSrc}
             alt="Student Script"
-            className="w-full h-auto block pointer-events-none"
+            className="block w-full h-auto max-w-none pointer-events-none"
             draggable={false}
           />
 

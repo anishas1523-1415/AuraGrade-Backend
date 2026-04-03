@@ -92,6 +92,8 @@ export default function RubricUploadPage() {
   const [newSubject, setNewSubject] = useState("");
   const [newTitle, setNewTitle] = useState("");
   const [showCreateForm, setShowCreateForm] = useState(false);
+  const [assessmentsLoading, setAssessmentsLoading] = useState(true);
+  const [assessmentError, setAssessmentError] = useState<string | null>(null);
 
   // Model answer state
   const [modelAnswerText, setModelAnswerText] = useState("");
@@ -217,26 +219,31 @@ export default function RubricUploadPage() {
   /* ---------- Load assessments ---------- */
   useEffect(() => {
     const fetchAssessments = async () => {
+      setAssessmentsLoading(true);
+      setAssessmentError(null);
       if (loading) return;
-      if (!user) {
-        setAssessments([]);
-        setSyncResult({ success: false, message: "Please sign in to load assessments." });
-        return;
-      }
       try {
         const res = await authFetch(`${API_URL}/api/assessments`);
         if (res.ok) {
           const data = await res.json();
-          setAssessments(data);
+          const rows = Array.isArray(data) ? data : [];
+          setAssessments(rows);
+          setSelectedAssessment((prev) => prev || rows[0]?.id || "");
+          if (rows.length === 0) {
+            setAssessmentError("No assessments found. Create one to continue.");
+          }
           setSyncResult(null);
         } else if (res.status === 401) {
-          setSyncResult({ success: false, message: "Session expired. Please sign in again." });
+          setAssessments([]);
+          setAssessmentError("Sign in required to load assessments.");
         } else {
-          setSyncResult({ success: false, message: "Failed to load assessments. Please sign in again." });
+          setAssessmentError("Failed to load assessments. Please try again.");
         }
       } catch (err) {
-        console.error("Failed to load assessments:", err);
-        setSyncResult({ success: false, message: `Cannot reach backend at ${API_URL}. Is NEXT_PUBLIC_API_URL set?` });
+        void err;
+        setAssessmentError(`Cannot reach backend at ${API_URL}. Check API and CORS settings.`);
+      } finally {
+        setAssessmentsLoading(false);
       }
     };
     fetchAssessments();
@@ -403,7 +410,7 @@ export default function RubricUploadPage() {
         setSyncResult({ success: false, message: `Create failed: ${err.detail || res.statusText}` });
       }
     } catch (err) {
-      console.error("Create assessment failed:", err);
+      void err;
       setSyncResult({ success: false, message: `Cannot reach backend at ${API_URL}. Check your connection.` });
     } finally {
       setCreatingAssessment(false);
@@ -583,10 +590,15 @@ export default function RubricUploadPage() {
                 <select
                   value={selectedAssessment}
                   onChange={(e) => setSelectedAssessment(e.target.value)}
+                  disabled={assessmentsLoading}
                   className="flex-1 min-w-[260px] rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm text-white/80 focus:outline-none focus:ring-1 focus:ring-blue-500/40 appearance-none cursor-pointer"
                 >
                   <option value="" className="bg-slate-900">
-                    Select an assessment…
+                    {assessmentsLoading
+                      ? "Loading assessments..."
+                      : assessments.length === 0
+                        ? "No assessments found"
+                        : "Select an assessment..."}
                   </option>
                   {assessments.map((a) => (
                     <option key={a.id} value={a.id} className="bg-slate-900">
@@ -604,6 +616,12 @@ export default function RubricUploadPage() {
                   <Plus className="mr-1 h-3.5 w-3.5" /> New Assessment
                 </Button>
               </div>
+
+              {assessmentError && (
+                <div className="mt-3 rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                  {assessmentError}
+                </div>
+              )}
 
               {/* Create new assessment inline form */}
               <AnimatePresence>

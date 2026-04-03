@@ -37,7 +37,12 @@ CREATE INDEX IF NOT EXISTS idx_students_reg_no ON students (reg_no);
 -- ============================================================
 CREATE TABLE IF NOT EXISTS assessments (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  subject_id      TEXT,
     subject         TEXT NOT NULL,
+  class_id        TEXT,
+  semester        TEXT,
+  department      TEXT,
+  staff_email     TEXT,
     title           TEXT NOT NULL DEFAULT 'Untitled Assessment',
     model_answer    TEXT,
     rubric_json     JSONB DEFAULT '{}'::jsonb,
@@ -73,6 +78,30 @@ CREATE INDEX IF NOT EXISTS idx_exception_queue_status ON exception_queue (status
 CREATE INDEX IF NOT EXISTS idx_exception_queue_reg ON exception_queue (extracted_reg_no);
 
 ALTER TABLE exception_queue ENABLE ROW LEVEL SECURITY;
+
+-- ============================================================
+-- Table: staff_allocations
+-- COE-controlled map of staff_email → subject/class/semester
+-- ============================================================
+CREATE TABLE IF NOT EXISTS staff_allocations (
+  id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  staff_id        UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+  staff_email     TEXT NOT NULL,
+  subject_id      TEXT NOT NULL,
+  class_id        TEXT NOT NULL,
+  semester        TEXT NOT NULL,
+  department      TEXT,
+  is_active       BOOLEAN DEFAULT true,
+  created_at      TIMESTAMPTZ DEFAULT now(),
+  updated_at      TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_staff_allocations_unique
+  ON staff_allocations (staff_email, subject_id, class_id, semester);
+CREATE INDEX IF NOT EXISTS idx_staff_allocations_staff ON staff_allocations (staff_id);
+CREATE INDEX IF NOT EXISTS idx_staff_allocations_subject ON staff_allocations (subject_id, class_id, semester);
+
+ALTER TABLE staff_allocations ENABLE ROW LEVEL SECURITY;
 
 -- ============================================================
 -- Table: grades (The Connector)

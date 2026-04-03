@@ -367,7 +367,7 @@ export default function EvaluationDashboard() {
         }
       }
     } catch (error) {
-      console.error("Evaluation failed:", error);
+      void error;
       setStreamLog((prev) => [
         ...prev,
         { icon: "❌", text: `Connection failed: ${error instanceof Error ? error.message : "Unknown error"}`, phase: "error" },
@@ -484,7 +484,7 @@ export default function EvaluationDashboard() {
         }
       }, 3000);
     } catch (error) {
-      console.error("Batch evaluation failed:", error);
+      void error;
       setStreamLog((prev) => [
         ...prev,
         { icon: "❌", text: `Batch failed: ${error instanceof Error ? error.message : "Unknown error"}`, phase: "error" },

@@ -72,6 +72,11 @@ Analyze this handwritten answer sheet image and determine:
 2. What TYPE of diagram(s) are present?
 3. Where in the image are they located (approximate region)?
 
+Be conservative about false negatives: if you see any drawn structure such as
+boxes, arrows, nodes, connectors, flow lines, circuit symbols, table-like
+schemas, or hand-drawn architecture sketches, set "has_diagram" to true.
+If uncertain, prefer true over false.
+
 Output strictly in JSON:
 {
     "has_diagram": <boolean — true if any diagram is detected>,

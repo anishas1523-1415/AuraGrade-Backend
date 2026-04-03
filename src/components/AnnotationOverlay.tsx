@@ -10,7 +10,7 @@ import { Info, XCircle, ZoomIn, ZoomOut, Layers, Eye, EyeOff, ShieldCheck, Shiel
 
 export interface Annotation {
   id: string;
-  type: "key_term" | "error" | "diagram" | "partial" | "correction";
+  type: "key_term" | "error" | "diagram" | "partial" | "correction" | "penalty";
   label: string;
   description: string;
   points?: number;
@@ -42,6 +42,7 @@ const typeStyles: Record<Annotation["type"], { border: string; bg: string; text:
   diagram:    { border: "border-blue-500",    bg: "bg-blue-500/10",    text: "text-blue-400",    ring: "ring-blue-400/30",    dot: "bg-blue-500" },
   partial:    { border: "border-amber-500",   bg: "bg-amber-500/10",   text: "text-amber-400",   ring: "ring-amber-400/30",   dot: "bg-amber-500" },
   correction: { border: "border-purple-500",  bg: "bg-purple-500/10",  text: "text-purple-400",  ring: "ring-purple-400/30",  dot: "bg-purple-500" },
+  penalty:    { border: "border-rose-500",    bg: "bg-rose-500/10",    text: "text-rose-400",    ring: "ring-rose-400/30",    dot: "bg-rose-500" },
 };
 
 const typeLabels: Record<Annotation["type"], string> = {
@@ -50,6 +51,7 @@ const typeLabels: Record<Annotation["type"], string> = {
   diagram: "Diagram",
   partial: "Partial Credit",
   correction: "Correction",
+  penalty: "Deduction",
 };
 
 /**
@@ -164,7 +166,7 @@ export const AnnotationOverlay: React.FC<AnnotationOverlayProps> = ({
 
   /* ---------- render ---------- */
   return (
-    <div className="relative flex flex-col h-full w-full select-none">
+    <div className="relative flex h-full min-h-0 w-full select-none flex-col">
       {/* ─── Toolbar ─── */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-white/10 bg-black/30 backdrop-blur-xl z-30 shrink-0">
         {/* Left: Legend chips */}
@@ -223,7 +225,7 @@ export const AnnotationOverlay: React.FC<AnnotationOverlayProps> = ({
       {/* ─── Canvas area ─── */}
       <div
         ref={containerRef}
-        className="relative flex-1 overflow-auto cursor-grab active:cursor-grabbing"
+        className="relative flex-1 min-h-0 overflow-auto cursor-grab active:cursor-grabbing bg-black/10"
         onWheel={handleWheel}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
@@ -231,7 +233,7 @@ export const AnnotationOverlay: React.FC<AnnotationOverlayProps> = ({
         onPointerLeave={handlePointerUp}
       >
         <div
-          className="relative w-full h-full transition-transform duration-150 origin-center"
+          className="relative min-h-full w-full transition-transform duration-150 origin-center"
           style={{
             transform: `scale(${zoom}) translate(${pan.x / zoom}px, ${pan.y / zoom}px)`,
           }}
@@ -240,7 +242,7 @@ export const AnnotationOverlay: React.FC<AnnotationOverlayProps> = ({
           <img
             src={imageSrc}
             alt="Student Script"
-            className="w-full h-auto block pointer-events-none"
+            className="block w-full h-auto max-w-none pointer-events-none"
             draggable={false}
           />
 
@@ -318,6 +320,18 @@ export const AnnotationOverlay: React.FC<AnnotationOverlayProps> = ({
                           </span>
                         )}
                       </div>
+
+                      {/* Inline reason strip on the box itself */}
+                      {note.description && (
+                        <div
+                          className={`absolute left-0 right-0 bottom-0 px-1.5 py-0.5 text-[9px] leading-tight border-t truncate ${note.points !== undefined && note.points < 0
+                            ? "bg-rose-500/25 text-rose-100 border-rose-400/40"
+                            : "bg-emerald-500/20 text-emerald-100 border-emerald-400/30"}`}
+                          title={note.description}
+                        >
+                          {note.description}
+                        </div>
+                      )}
 
                       {/* ── Tooltip on hover ── */}
                       <AnimatePresence>

@@ -37,7 +37,6 @@ logger = logging.getLogger("auragrade.retry")
 # ---------------------------------------------------------------------------
 
 import time
-import threading
 
 class AuraGradeKeyManager:
     def __init__(self, api_keys):
